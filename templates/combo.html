@@ -2,12 +2,12 @@
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>KTV 播放+遙控一體機</title>
+    <title>KTV Combo Console</title>
     <style>
         /* --- 全局與響應式佈局 --- */
         body { background: #1a1a1a; color: white; font-family: "Microsoft JhengHei", sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
         
-        #player-container { flex: 0 0 45vh; background: #000; position: relative; display: flex; justify-content: center; align-items: center; }
+        #player-container { flex: 0 0 45vh; background: #000; position: relative; display: flex; flex-direction: column; min-height: 0; }
         #remote-container { flex: 1; overflow-y: auto; padding: 15px; background: #222; display: flex; flex-direction: column; }
 
         /* 當螢幕夠寬 (例如筆電/PC) 時，自動變成左右分割模式 */
@@ -18,11 +18,17 @@
         }
 
         /* --- 播放器區塊 UI --- */
+        #video-shell { position: relative; flex: 1 1 auto; min-height: 0; background: #000; }
         video { width: 100%; height: 100%; object-fit: contain; display: none; }
         #overlay { position: absolute; top: 15px; left: 15px; font-size: 18px; text-shadow: 2px 2px 4px #000; z-index: 10; background: rgba(0,0,0,0.5); padding: 8px 12px; border-radius: 5px; pointer-events: none; }
         #next-info { position: absolute; top: 0; left: 0; right: 0; background: rgba(0, 100, 0, 0.8); color: white; text-align: center; padding: 8px; font-size: 16px; z-index: 20; display: none; font-weight: bold; }
         #fs-btn { position: absolute; top: 15px; right: 15px; z-index: 50; background: rgba(255,255,255,0.2); color: white; border: 1px solid white; padding: 5px 10px; cursor: pointer; border-radius: 5px; font-size: 14px; }
         #fs-btn:hover { background: rgba(255,255,255,0.4); }
+        #lyrics-box { flex: 0 0 auto; width: min(92vw, 900px); margin: 0 auto; padding: 14px 12px 18px; text-align: center; z-index: 12; pointer-events: none; box-sizing: border-box; border-top: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.92); min-height: 96px; }
+        .lyric-line { display: block; padding: 8px 14px; margin: 6px 0; border-radius: 10px; background: rgba(0,0,0,0.35); text-shadow: 2px 2px 4px #000; }
+        .lyric-current { font-size: clamp(24px, 3vw, 38px); font-weight: 700; color: #fff; }
+        .lyric-next { font-size: clamp(15px, 2vw, 22px); color: #d0d0d0; opacity: 0.9; }
+        .lyric-placeholder { font-size: 16px; color: #999; padding: 18px 0; }
         #idle-screen { text-align: center; width: 100%; }
         #waiting { font-size: 24px; color: #aaa; cursor: pointer; border: 2px dashed #555; padding: 20px; border-radius: 10px; background: rgba(255,255,255,0.05); display: inline-block; }
         #waiting:hover { color: #fff; border-color: #fff; }
@@ -47,11 +53,17 @@
         #queue-list { font-size: 14px; color: #aaa; padding-left: 20px; margin: 0; }
         #queue-list li { background: none; border: none; padding: 3px 0; display: list-item; list-style-type: decimal; }
 
+        .seek-box { background: #333; padding: 12px; border-radius: 8px; margin-bottom: 15px; }
+        .seek-times { display: flex; justify-content: space-between; font-size: 13px; color: #ccc; margin-top: 6px; }
+        .seek-jump { display: flex; gap: 8px; margin-top: 8px; }
+        .seek-jump input { margin: 0; flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #555; background: #2b2b2b; color: #fff; }
+        .seek-jump button { min-width: 110px; }
         /* 搜尋與列表 */
         input[type=text] { width: 100%; padding: 12px; margin-bottom: 10px; box-sizing: border-box; background: #333; border: 1px solid #555; color: white; border-radius: 8px; font-size: 15px;}
         ul#list { list-style: none; padding: 0; margin: 0; flex-grow: 1; overflow-y: auto; }
         ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;}
         .song-btn { background: #009688; border: none; padding: 8px 16px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
+        .song-delete { background: #d32f2f; border: none; padding: 8px 12px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
@@ -59,47 +71,53 @@
 </head>
 <body>
     <div id="player-container">
-        <div id="next-info">下一首：無</div>
-        <div id="overlay">等待連線...</div>
-        <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
-        
-        <div id="idle-screen" ondblclick="toggleFullScreen()">
-            <div id="waiting" onclick="initSystem()">📺 點擊此處啟動音效引擎</div>
+        <div id="video-shell">
+            <div id="next-info">Up next: none</div>
+            <div id="overlay">Connecting...</div>
+            <div id="fs-btn" onclick="toggleFullScreen()">⛶ Fullscreen</div>
+            
+            <div id="idle-screen" ondblclick="toggleFullScreen()">
+                <div id="waiting" onclick="initSystem()">📺 Click here to start the audio engine</div>
+            </div>
+            
+            <video id="vid" controls playsinline crossorigin="anonymous" ondblclick="toggleFullScreen()"></video>
         </div>
-        
-        <video id="vid" playsinline crossorigin="anonymous" ondblclick="toggleFullScreen()"></video>
+        <div id="lyrics-box">
+            <span id="lyric-current" class="lyric-line lyric-current lyric-placeholder">Lyrics will appear here when a song is playing.</span>
+            <span id="lyric-next" class="lyric-line lyric-next"></span>
+        </div>
     </div>
 
     <div id="remote-container">
-        <a href="/admin" class="admin-link">⚙️ 進入後台 (下載新歌)</a>
+        <a href="/admin" class="admin-link">⚙️ Open Admin (add songs)</a>
         
         <div class="grid">
-            <button class="btn vocal" onclick="track('original')">🎤 原唱</button>
-            <button class="btn inst" onclick="track('instrumental')">🚫 伴奏</button>
-            <button class="btn pause" onclick="cmd('pause')">⏯ 暫停/播放</button>
-            <button class="btn stop" onclick="cmd('cut')">⏹ 切歌 (下一首)</button>
+            <button class="btn vocal" onclick="track('original')">🎤 Original</button>
+            <button class="btn inst" onclick="track('instrumental')">🚫 Instrumental</button>
+            <button class="btn pause" onclick="cmd('pause')">⏯ Play / Pause</button>
+            <button class="btn stop" onclick="cmd('cut')">⏹ Next Song</button>
         </div>
 
 <div class="control-group">
-            <div class="control-label"><span>🔊 音量控制</span><span id="vol-val">100%</span></div>
+            <div class="control-label"><span>🔊 Volume</span><span id="vol-val">100%</span></div>
             <input type="range" id="vol" min="0" max="2" step="0.1" value="1" oninput="updateEffect()">
         </div>
 
         <div class="control-group">
-            <div class="control-label"><span>🎵 升降 KEY</span><span id="key-val">原 KEY (0)</span></div>
+            <div class="control-label"><span>🎵 Key Shift</span><span id="key-val">Original Key (0)</span></div>
             <div style="display: flex; gap: 5px;">
-                <button class="btn" style="background:#555; flex:1;" onclick="changeKey(-1)">🔻 降</button>
-                <button class="btn" style="background:#777; flex:1;" onclick="changeKey(0)">0 (原)</button>
-                <button class="btn" style="background:#555; flex:1;" onclick="changeKey(1)">🔺 升</button>
+                <button class="btn" style="background:#555; flex:1;" onclick="changeKey(-1)">🔻 Down</button>
+                <button class="btn" style="background:#777; flex:1;" onclick="changeKey(0)">0 (Original)</button>
+                <button class="btn" style="background:#555; flex:1;" onclick="changeKey(1)">🔺 Up</button>
             </div>
         </div>
 
         <div class="queue-box">
-            <div class="queue-title">📋 待播清單</div>
-            <ul id="queue-list"><li>(無)</li></ul>
+            <div class="queue-title">📋 Queue</div>
+            <ul id="queue-list"><li>(none)</li></ul>
         </div>
 
-        <input type="text" id="search" placeholder="🔍 搜尋歌曲..." oninput="filter()">
+        <input type="text" id="search" placeholder="🔍 Search songs..." oninput="filter()">
         <ul id="list"></ul>
     </div>
 
@@ -113,11 +131,144 @@ const socket = io();
         const idleScreen = document.getElementById('idle-screen');
         const waitingBtn = document.getElementById('waiting');
         const playerContainer = document.getElementById('player-container');
+        const lyricsBox = document.getElementById('lyrics-box');
+        const lyricCurrent = document.getElementById('lyric-current');
+        const lyricNext = document.getElementById('lyric-next');
         
         let audioCtx, source, splitter, gainL, gainR, merger, masterGain, pitchShift;
         let isAudioSetup = false;
         let currentMode = 'original';
         let currentKey = 0; 
+        let lyricsTrack = [];
+        let lyricsIndex = -1;
+        let pendingSeekSeconds = null;
+        let lyricsNeedsAutoTiming = false;
+        let currentLyricsFilename = '';
+
+        function formatTime(totalSeconds) {
+            const safe = Math.max(0, Math.floor(totalSeconds || 0));
+            const h = Math.floor(safe / 3600);
+            const m = Math.floor((safe % 3600) / 60);
+            const s = safe % 60;
+            if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+            return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+
+        function applySeek(seconds) {
+            const target = Math.max(0, Number(seconds) || 0);
+            if (video.readyState >= 1) {
+                const duration = Number.isFinite(video.duration) ? video.duration : 0;
+                video.currentTime = duration > 0 ? Math.min(target, duration) : target;
+            } else {
+                pendingSeekSeconds = target;
+            }
+        }
+
+        function clearLyrics() {
+            lyricsTrack = [];
+            lyricsIndex = -1;
+            lyricsNeedsAutoTiming = false;
+            lyricsBox.hidden = false;
+            lyricCurrent.className = 'lyric-line lyric-current lyric-placeholder';
+            lyricCurrent.innerText = 'Lyrics will appear here when a song is playing.';
+            lyricNext.innerText = '';
+            lyricNext.className = 'lyric-line lyric-next';
+        }
+
+        function distributeLyricsAcrossDuration(lines, duration) {
+            if (!lines.length) return [];
+
+            const safeDuration = Math.max(0, Number(duration) || 0);
+            const pacingFactor = 1.7;
+            const leadInSeconds = 8;
+            const segment = lines.length > 0 ? (safeDuration * pacingFactor) / Math.max(lines.length, 1) : 0;
+            return lines.map((text, index) => ({
+                time: leadInSeconds + (segment > 0 ? index * segment : index * 4),
+                text,
+            }));
+        }
+
+        function parseLrc(text) {
+            const parsed = String(text || '').split(/\r?\n/).flatMap((line) => {
+                const matches = [...line.matchAll(/\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g)];
+                const lyricText = line.replace(/(?:\[\d{1,2}:\d{2}(?:\.\d{1,3})?\])+/, '').trim();
+                if (!matches.length || !lyricText) return [];
+                return matches.map((match) => {
+                    const minutes = parseInt(match[1], 10);
+                    const seconds = parseInt(match[2], 10);
+                    const fraction = parseInt((match[3] || '0').padEnd(3, '0'), 10);
+                    return { time: minutes * 60 + seconds + fraction / 1000, text: lyricText };
+                });
+            }).sort((a, b) => a.time - b.time);
+
+            if (parsed.length > 0) return parsed;
+
+            const plainLines = String(text || '')
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter(Boolean);
+
+            lyricsNeedsAutoTiming = plainLines.length > 0;
+            return distributeLyricsAcrossDuration(plainLines, video.duration || 180);
+        }
+
+        function refreshLyricsTimingIfNeeded() {
+            if (!lyricsTrack.length || !lyricsNeedsAutoTiming) return;
+
+            const rawLines = lyricsTrack.map((line) => line.text).filter(Boolean);
+            if (!rawLines.length) return;
+
+            const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 180;
+            lyricsTrack = distributeLyricsAcrossDuration(rawLines, duration);
+            lyricsNeedsAutoTiming = false;
+        }
+
+        async function loadLyricsForSong(filename) {
+            clearLyrics();
+            currentLyricsFilename = filename || '';
+            const baseName = filename.replace(/\.mp4$/i, '');
+            try {
+                const response = await fetch(`/lyrics/${encodeURIComponent(baseName)}.lrc?t=${Date.now()}`);
+                if (!response.ok) return;
+                const text = await response.text();
+                lyricsTrack = parseLrc(text);
+                if (lyricsTrack.length > 0) {
+                    lyricsBox.hidden = false;
+                    lyricCurrent.className = 'lyric-line lyric-current';
+                    lyricNext.className = 'lyric-line lyric-next';
+                    updateLyricsDisplay();
+                }
+            } catch (error) {
+                clearLyrics();
+            }
+        }
+
+        function updateLyricsDisplay() {
+            if (!lyricsTrack.length) return;
+            refreshLyricsTimingIfNeeded();
+            const currentTime = video.currentTime || 0;
+            let index = lyricsTrack.findIndex((line, lineIndex) => {
+                const nextTime = lyricsTrack[lineIndex + 1]?.time ?? Number.POSITIVE_INFINITY;
+                return currentTime >= line.time && currentTime < nextTime;
+            });
+            if (index === -1 && currentTime >= lyricsTrack[lyricsTrack.length - 1].time) {
+                index = lyricsTrack.length - 1;
+            }
+            if (index === -1) {
+                lyricCurrent.className = 'lyric-line lyric-current';
+                lyricNext.className = 'lyric-line lyric-next';
+                lyricCurrent.innerText = '';
+                lyricNext.innerText = lyricsTrack[0]?.text || '';
+                return;
+            }
+            if (index !== lyricsIndex) {
+                lyricsIndex = index;
+                lyricCurrent.className = 'lyric-line lyric-current';
+                lyricNext.className = 'lyric-line lyric-next';
+                lyricCurrent.innerText = lyricsTrack[index].text;
+                lyricNext.innerText = lyricsTrack[index + 1]?.text || '';
+            }
+        }
 
         function toggleFullScreen() {
             if (!document.fullscreenElement) {
@@ -135,7 +286,7 @@ const socket = io();
             }
             if(audioCtx.state === 'suspended') audioCtx.resume();
             
-            waitingBtn.innerHTML = "✅ 音效已啟動<br><span style='font-size:16px;color:#888;'>請從下方/右方點歌</span>";
+            waitingBtn.innerHTML = "✅ Audio engine started<br><span style='font-size:16px;color:#888;'>Pick a song from below/right</span>";
             waitingBtn.style.borderColor = "#4CAF50";
             waitingBtn.style.color = "#4CAF50";
         }
@@ -184,7 +335,7 @@ const socket = io();
             if(pitchShift && data.pitch !== undefined) {
                 currentKey = data.pitch;
                 pitchShift.pitch = currentKey; 
-                document.getElementById('key-val').innerText = currentKey === 0 ? "原 KEY (0)" : (currentKey > 0 ? "+" + currentKey : currentKey);
+                document.getElementById('key-val').innerText = currentKey === 0 ? "Original Key (0)" : (currentKey > 0 ? "+" + currentKey : currentKey);
             }
         });
 
@@ -192,25 +343,27 @@ const socket = io();
         socket.on('play_video', (data) => {
             idleScreen.style.display = 'none';
             video.style.display = 'block';
-            overlay.innerText = "播放中: " + data.title;
+            overlay.innerText = "Playing: " + data.title;
             video.src = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            loadLyricsForSong(data.filename);
             video.play().then(() => {
                 if(!isAudioSetup) setupAudio();
                 setAudioMode('original'); 
                 updateEffect(); 
-                socket.emit('control_effect', { pitch: 0 }); // 新歌自動回歸原 KEY
-            }).catch(e => { overlay.innerText = "⚠️ 請點擊畫面開始播放"; });
+                socket.emit('control_effect', { pitch: 0 });
+            }).catch(e => { overlay.innerText = "⚠️ Click the screen to start playback"; });
         });
 
         // 👑 修正點 2：當影片播完時，發送 song_ended 讓後端決定下一首歌
         video.onended = function() { socket.emit('song_ended'); };
 
-        socket.on('connect', () => { overlay.innerText = "✅ 已連線"; });
+        socket.on('connect', () => { overlay.innerText = "✅ Connected"; });
 
         socket.on('stop_video', () => {
             video.pause(); video.src = ""; video.style.display = 'none';
-            idleScreen.style.display = 'block'; overlay.innerText = "⏹ 已停止 (待機中)";
+            idleScreen.style.display = 'block'; overlay.innerText = "⏹ Stopped (idle)";
             nextInfo.style.display = 'none';
+            clearLyrics();
         });
 
         socket.on('command', (cmd) => {
@@ -222,17 +375,30 @@ const socket = io();
             setAudioMode(mode);
         });
 
+        socket.on('seek_to', (data) => {
+            applySeek((data || {}).seconds);
+        });
+
         function setAudioMode(mode) {
             if(!isAudioSetup || !gainL || !gainR) return;
             const now = audioCtx.currentTime;
-            if (mode === 'original') { 
+            if (mode === 'original') {
                 gainL.gain.setTargetAtTime(1, now, 0.1); gainR.gain.setTargetAtTime(0, now, 0.1);
-                overlay.innerText = "🎤 模式：原唱";
-            } else if (mode === 'instrumental') { 
+                overlay.innerText = "🎤 Mode: Original";
+            } else if (mode === 'instrumental') {
                 gainL.gain.setTargetAtTime(0, now, 0.1); gainR.gain.setTargetAtTime(1, now, 0.1);
-                overlay.innerText = "🚫 模式：伴奏";
+                overlay.innerText = "🚫 Mode: Instrumental";
             }
         }
+
+        video.addEventListener('loadedmetadata', () => {
+            if (pendingSeekSeconds !== null) {
+                const target = pendingSeekSeconds;
+                pendingSeekSeconds = null;
+                applySeek(target);
+            }
+            refreshLyricsTimingIfNeeded();
+        });
 
         // --- 遙控器邏輯 ---
         let allSongs = [];
@@ -247,7 +413,7 @@ const socket = io();
 
         socket.on('update_queue', (playlist) => {
             if(playlist.length > 1) {
-                nextInfo.innerText = "下一首：" + playlist[1].replace('.mp4', '');
+                nextInfo.innerText = "Up next: " + playlist[1].replace('.mp4', '');
                 nextInfo.style.display = 'block';
             } else {
                 nextInfo.style.display = 'none';
@@ -256,15 +422,19 @@ const socket = io();
             const qList = document.getElementById('queue-list');
             qList.innerHTML = "";
             if(playlist.length === 0) {
-                qList.innerHTML = "<li>(無)</li>";
+                qList.innerHTML = "<li>(none)</li>";
             } else {
                 playlist.forEach((s, index) => {
                     if (index === 0) {
-                        qList.innerHTML += `<li style="color:#4CAF50; font-weight:bold;">🎵 播放中：${s.replace('.mp4', '')}</li>`;
+                        qList.innerHTML += `<li style="color:#4CAF50; font-weight:bold;">🎵 Now playing: ${s.replace('.mp4', '')}</li>`;
                     } else {
                         qList.innerHTML += `<li>${s.replace('.mp4', '')}</li>`;
                     }
                 });
+            }
+
+            if (playlist.length > 0 && playlist[0] !== currentLyricsFilename) {
+                loadLyricsForSong(playlist[0]);
             }
         });
 
@@ -274,21 +444,42 @@ const socket = io();
             list.innerHTML = "";
             allSongs.filter(s => s.toLowerCase().includes(key)).forEach(s => {
                 const name = s.replace('.mp4', '');
-                list.innerHTML += `<li><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:70%; font-size:15px;">${name}</span><button class="song-btn" onclick="play(this, '${s}')">播歌</button></li>`;
+                list.innerHTML += `<li><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:55%; font-size:15px;">${name}</span><div style="display:flex; gap:6px;"><button class="song-btn" onclick="play(this, '${s}')">Play</button><button class="song-delete" onclick="deleteSong(this, '${s}')">Delete</button></div></li>`;
             });
         }
 
         function play(btn, filename) { 
-            // 👑 修正點 3：改成發送 add_to_queue 指令，而不是 request_play
             socket.emit('add_to_queue', {filename: filename}); 
             const originalText = btn.innerText;
-            btn.innerText = "已點";
+            btn.innerText = "Queued";
             btn.style.background = "#555";
             setTimeout(() => {
                 btn.innerText = originalText;
                 btn.style.background = "#009688";
             }, 1000);
         }
+
+        function deleteSong(btn, filename) {
+            if (!confirm(`Delete ${filename.replace('.mp4', '')}?`)) return;
+            btn.innerText = "Deleting...";
+            btn.disabled = true;
+            btn.style.background = "#777";
+
+            fetch('/api/delete/' + encodeURIComponent(filename), { method: 'POST' })
+                .then(response => {
+                    if (!response.ok) throw new Error('Delete failed');
+                    return response.json();
+                })
+                .then(() => loadList())
+                .catch(() => {
+                    btn.innerText = "Delete";
+                    btn.disabled = false;
+                    btn.style.background = "#d32f2f";
+                    alert('Failed to delete the song.');
+                });
+        }
+
+            video.addEventListener('timeupdate', updateLyricsDisplay);
 
         function cmd(action) { socket.emit('control', action); }
         function track(mode) { socket.emit('change_track', mode); }

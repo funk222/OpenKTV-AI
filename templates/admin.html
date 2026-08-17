@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KTV 系統管理後台</title>
+    <title>KTV Admin</title>
     <style>
         body { background: #f4f4f9; color: #333; font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
         .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
@@ -12,8 +12,17 @@
         
         .btn-dl { background: #FF9800; }
         .btn-update { background: #607D8B; }
+        .btn-secondary { background: #455A64; }
         .btn-dl:disabled, .btn-update:disabled { background: #ccc; cursor: not-allowed; }
-        textarea { width: 100%; height: 200px; background: #222; color: #0f0; padding: 10px; box-sizing: border-box; font-family: monospace; border-radius: 5px; resize: none; }
+        textarea { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
+        #log { height: 200px; background: #222; color: #0f0; font-family: monospace; resize: none; }
+        #yt_lyrics { min-height: 140px; background: #fff; color: #333; font-family: monospace; resize: vertical; margin-bottom: 15px; }
+        .batch-list { display: grid; gap: 8px; margin-bottom: 10px; }
+        .batch-row { display: grid; grid-template-columns: 1.4fr 1fr auto; gap: 8px; align-items: center; }
+        .batch-row input { margin: 0; }
+        .row-remove { width: auto; margin: 0; padding: 10px 12px; background: #d32f2f; }
+        .batch-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .batch-help { font-size: 13px; color: #666; margin-bottom: 10px; }
         
         /* 導航列樣式 */
         .nav-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
@@ -28,27 +37,38 @@
 <body>
     
     <div class="nav-bar">
-        <a href="/remote" class="nav-btn nav-remote">📱 遙控器</a>
-        <a href="/combo" class="nav-btn nav-combo">🖥️ 雙合一控制台</a>
-        <a href="/player" class="nav-btn nav-player">📺 播放端</a>
+        <a href="/remote" class="nav-btn nav-remote">📱 Remote</a>
+        <a href="/combo" class="nav-btn nav-combo">🖥️ Combo</a>
+        <a href="/player" class="nav-btn nav-player">📺 Player</a>
     </div>
 
     <div class="card">
-        <h3>📥 新增 KTV 歌曲</h3>
-        <label>1. YouTube 網址:</label>
+        <h3>📥 Add a KTV Song</h3>
+        <label>1. YouTube URL:</label>
         <input type="text" id="yt_url" placeholder="https://www.youtube.com/watch?v=...">
-        <label>2. 設定歌名 (必填):</label>
-        <input type="text" id="yt_title" placeholder="例如：告五人 - 披星戴月的想你">
-        <button id="btn_dl" class="btn-dl" onclick="startDownload()">開始製作 (L:原唱 / R:伴奏)</button>
+        <label>2. Song title (required):</label>
+        <input type="text" id="yt_title" placeholder="Example: Artist - Song Title">
+        <label>3. Lyrics (optional, paste LRC format for sync):</label>
+        <textarea id="yt_lyrics" placeholder="[00:12.00]First line\n[00:18.50]Second line"></textarea>
+        <button id="btn_dl" class="btn-dl" onclick="startDownload()">Start Processing (L: vocal / R: instrumental)</button>
+
+        <hr style="border: 0; border-top: 1px solid #ddd; margin: 18px 0;">
+        <label>4. Bulk add songs (easy mode):</label>
+        <div class="batch-help">Fill one row per song, then click Start Batch Processing.</div>
+        <div id="batch_rows" class="batch-list"></div>
+        <div class="batch-actions">
+            <button id="btn_add_row" class="btn-secondary" onclick="addBatchRow()">+ Add Row</button>
+            <button id="btn_batch" class="btn-dl" onclick="startBatchDownload()">Start Batch Processing</button>
+        </div>
     </div>
 
     <div class="card">
-        <h3>⚙️ 系統維護</h3>
-        <button id="btn_update" class="btn-update" onclick="updateYtDlp()">🔄 手動更新 yt-dlp 核心</button>
+        <h3>⚙️ Maintenance</h3>
+        <button id="btn_update" class="btn-update" onclick="updateYtDlp()">🔄 Update yt-dlp Core</button>
     </div>
 
     <div class="card">
-        <h3>📝 系統日誌</h3>
+        <h3>📝 System Log</h3>
         <textarea id="log" readonly></textarea>
     </div>
 
@@ -56,43 +76,126 @@
         const socket = io();
         const logArea = document.getElementById('log');
         const btnDl = document.getElementById('btn_dl');
+        const btnBatch = document.getElementById('btn_batch');
+        const btnAddRow = document.getElementById('btn_add_row');
         const btnUpdate = document.getElementById('btn_update');
+        const lyricsArea = document.getElementById('yt_lyrics');
+        const batchRowsContainer = document.getElementById('batch_rows');
+        let queuedCount = 0;
+
+        function setBusyUi(isBusy, labelText) {
+            btnUpdate.disabled = isBusy;
+            btnDl.innerText = isBusy ? (labelText || "Processing... (you can keep adding)") : "Start Processing (L: vocal / R: instrumental)";
+            btnBatch.innerText = isBusy ? `Queue Batch (${queuedCount} waiting)` : "Start Batch Processing";
+        }
+
+        function createBatchRow(url = '', title = '') {
+            const row = document.createElement('div');
+            row.className = 'batch-row';
+            row.innerHTML = `
+                <input type="text" class="batch-url" placeholder="YouTube URL" value="${url.replace(/"/g, '&quot;')}">
+                <input type="text" class="batch-title" placeholder="Song title" value="${title.replace(/"/g, '&quot;')}">
+                <button class="row-remove" onclick="removeBatchRow(this)">✕</button>
+            `;
+            return row;
+        }
+
+        function ensureAtLeastOneBatchRow() {
+            if (!batchRowsContainer.children.length) {
+                batchRowsContainer.appendChild(createBatchRow());
+            }
+        }
+
+        function addBatchRow(url = '', title = '') {
+            batchRowsContainer.appendChild(createBatchRow(url, title));
+        }
+
+        function removeBatchRow(button) {
+            const row = button.closest('.batch-row');
+            if (row) row.remove();
+            ensureAtLeastOneBatchRow();
+        }
+
+        function resetBatchRows(defaultCount = 3) {
+            batchRowsContainer.innerHTML = '';
+            for (let i = 0; i < defaultCount; i += 1) {
+                addBatchRow();
+            }
+        }
+
+        function collectBatchJobs() {
+            const rows = [...batchRowsContainer.querySelectorAll('.batch-row')];
+            const jobs = [];
+            const invalidRows = [];
+
+            rows.forEach((row, idx) => {
+                const url = row.querySelector('.batch-url').value.trim();
+                const title = row.querySelector('.batch-title').value.trim();
+                if (!url && !title) return;
+                if (!url || !title) {
+                    invalidRows.push(idx + 1);
+                    return;
+                }
+                jobs.push({ url, title, lyrics: '' });
+            });
+
+            return { jobs, invalidRows };
+        }
 
         socket.on('admin_log', (data) => {
             logArea.value += data.msg + "\n";
-            logArea.scrollTop = logArea.scrollHeight; // 自動捲動到最底
+            logArea.scrollTop = logArea.scrollHeight;
         });
 
         socket.on('task_status', (data) => {
-            if(data.status === 'idle') {
-                btnDl.disabled = false;
-                btnDl.innerText = "開始製作 (L:原唱 / R:伴奏)";
-                btnUpdate.disabled = false;
-                document.getElementById('yt_url').value = '';
-                document.getElementById('yt_title').value = '';
-            } else if (data.status === 'busy') {
-                btnDl.disabled = true;
-                btnDl.innerText = "製作中...請稍候";
-                btnUpdate.disabled = true;
-            }
+            queuedCount = Number((data || {}).queued || 0);
+            if(data.status === 'idle') setBusyUi(false);
+            else setBusyUi(true, `Processing... (${queuedCount} waiting)`);
         });
 
         function startDownload() {
             const url = document.getElementById('yt_url').value.trim();
             const title = document.getElementById('yt_title').value.trim();
+            const lyrics = lyricsArea.value.trim();
             if(!url || !title) {
-                alert("網址與歌名皆為必填！");
+                alert("Both URL and song title are required.");
                 return;
             }
-            socket.emit('start_download', {url: url, title: title});
+            socket.emit('start_download', {url: url, title: title, lyrics: lyrics});
+            logArea.value += `📥 Added to queue: ${title}\n`;
+            logArea.scrollTop = logArea.scrollHeight;
+            document.getElementById('yt_url').value = '';
+            document.getElementById('yt_title').value = '';
+            lyricsArea.value = '';
+        }
+
+        function startBatchDownload() {
+            const parsed = collectBatchJobs();
+            if (!parsed.jobs.length) {
+                alert("Add at least one valid row with both URL and title.");
+                return;
+            }
+            if (parsed.invalidRows.length) {
+                alert("Some rows are incomplete (need both URL and title): " + parsed.invalidRows.join(', '));
+                return;
+            }
+
+            parsed.jobs.forEach((job) => {
+                socket.emit('start_download', job);
+                logArea.value += `📥 Added to queue: ${job.title}\n`;
+            });
+            logArea.scrollTop = logArea.scrollHeight;
+            resetBatchRows();
         }
 
         function updateYtDlp() {
-            if(confirm("確定要更新 yt-dlp 嗎？這需要幾秒鐘的時間。")) {
+            if(confirm("Update yt-dlp now? This will take a few seconds.")) {
                 btnUpdate.disabled = true;
                 socket.emit('update_ytdlp');
             }
         }
+
+        resetBatchRows();
     </script>
 </body>
 </html>

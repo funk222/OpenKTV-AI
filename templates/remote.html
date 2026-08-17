@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>KTV 遙控器</title>
+    <title>KTV Remote</title>
     <style>
         body { background: #1a1a1a; color: white; font-family: sans-serif; padding: 10px; margin: 0; }
         .btn { width: 100%; padding: 15px; margin: 5px 0; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; color: white; cursor: pointer; }
@@ -22,40 +22,50 @@
 </head>
 <body>
     <div style="text-align:center; margin-bottom:10px;">
-        <h3 style="margin:0;">📱 KTV 遙控器</h3>
-        <small style="color:#aaa;">已連線至主機</small>
+        <h3 style="margin:0;">📱 KTV Remote</h3>
+        <small style="color:#aaa;">Connected to host</small>
     </div>
 
-    <a href="/admin" class="admin-link">⚙️ 進入後台 (下載新歌/管理系統)</a>
+    <a href="/admin" class="admin-link">⚙️ Open Admin (add/manage songs)</a>
 
     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:5px;">
-        <button class="btn pause" onclick="cmd('pause')">⏯ 暫停/繼續</button>
-        <button class="btn stop" onclick="cmd('stop')">⏹ 切歌</button>
-        <button class="btn vocal" onclick="track('original')">🎤 原唱</button>
-        <button class="btn inst" onclick="track('instrumental')">🚫 伴奏</button>
+        <button class="btn pause" onclick="cmd('pause')">⏯ Play / Pause</button>
+        <button class="btn stop" onclick="cmd('stop')">⏹ Skip</button>
+        <button class="btn vocal" onclick="track('original')">🎤 Original</button>
+        <button class="btn inst" onclick="track('instrumental')">🚫 Instrumental</button>
     </div>
 
     <div style="background: #2a2a2a; padding: 15px; border-radius: 8px; margin-top: 10px; margin-bottom: 10px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #ccc; font-size: 14px;">
-            <span>🔊 音量控制</span><span id="vol-val">100%</span>
+            <span>🔊 Volume</span><span id="vol-val">100%</span>
         </div>
         <input type="range" id="vol" min="0" max="2" step="0.1" value="1" oninput="updateEffect()">
     </div>
 
     <div style="background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 10px; color: #ccc; font-size: 14px;">
-            <span>🎵 升降 KEY</span><span id="key-val">原 KEY (0)</span>
+            <span>🎵 Key Shift</span><span id="key-val">Original Key (0)</span>
         </div>
         <div style="display: flex; gap: 8px;">
-            <button class="btn" style="background:#555; flex:1; padding: 12px; margin: 0;" onclick="changeKey(-1)">🔻 降</button>
-            <button class="btn" style="background:#777; flex:1; padding: 12px; margin: 0;" onclick="changeKey(0)">0 (原)</button>
-            <button class="btn" style="background:#555; flex:1; padding: 12px; margin: 0;" onclick="changeKey(1)">🔺 升</button>
+            <button class="btn" style="background:#555; flex:1; padding: 12px; margin: 0;" onclick="changeKey(-1)">🔻 Down</button>
+            <button class="btn" style="background:#777; flex:1; padding: 12px; margin: 0;" onclick="changeKey(0)">0 (Original)</button>
+            <button class="btn" style="background:#555; flex:1; padding: 12px; margin: 0;" onclick="changeKey(1)">🔺 Up</button>
+        </div>
+    </div>
+
+    <div style="background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 10px; color: #ccc; font-size: 14px;">
+            <span>⏱ Jump To Time</span><span>mm:ss</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+            <input type="text" id="seek-input" placeholder="01:30" style="margin:0; flex:1;">
+            <button class="btn" style="background:#3f51b5; width:auto; padding: 0 16px; margin:0;" onclick="jumpToTimeInput()">Jump</button>
         </div>
     </div>
 
     <hr style="border-color: #333;">
     
-    <input type="text" id="search" placeholder="🔍 搜尋歌曲..." oninput="filter()">
+    <input type="text" id="search" placeholder="🔍 Search songs..." oninput="filter()">
     <ul id="list"></ul>
 
     <script>
@@ -63,7 +73,6 @@
         let allSongs = [];
         let currentKey = 0;
 
-        // --- 歌單與基本控制 ---
         socket.on('update_list', (songs) => {
             allSongs = songs;
             filter();
@@ -78,7 +87,7 @@
                 list.innerHTML += `
                     <li>
                         <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:60%;">${s}</span>
-                        <button class="song-btn" onclick="play('${s}')">播歌</button>
+                        <button class="song-btn" onclick="play('${s}')">Play</button>
                     </li>`;
             });
         }
@@ -86,6 +95,26 @@
         function play(filename) { socket.emit('request_play', {filename: filename}); }
         function cmd(action) { socket.emit('control', action); }
         function track(mode) { socket.emit('change_track', mode); }
+
+        function parseTimeInput(raw) {
+            const parts = String(raw || '').trim().split(':').map(p => p.trim());
+            if (!parts.length || parts.some(p => p === '' || Number.isNaN(Number(p)))) return null;
+            if (parts.length === 1) return Number(parts[0]);
+            if (parts.length === 2) return Number(parts[0]) * 60 + Number(parts[1]);
+            if (parts.length === 3) return Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number(parts[2]);
+            return null;
+        }
+
+        function jumpToTimeInput() {
+            const input = document.getElementById('seek-input');
+            const seconds = parseTimeInput(input.value);
+            if (seconds === null) {
+                alert('Use mm:ss or hh:mm:ss');
+                return;
+            }
+            socket.emit('seek_to', { seconds: Math.max(0, seconds) });
+            input.value = '';
+        }
 
         function loadList() {
             fetch('/api/list').then(r => r.json()).then(data => {
@@ -95,7 +124,6 @@
         }
         
         loadList();
-        // 監聽後台更新完畢事件，自動重整歌單
         socket.on('refresh_list', loadList);
 
         // --- 音效與升降 KEY 控制 ---
@@ -111,18 +139,16 @@
                 currentKey += step;
             }
             
-            // 限制最多升降 12 個半音 (一個八度)
             if(currentKey > 12) currentKey = 12;
             if(currentKey < -12) currentKey = -12;
             
             socket.emit('control_effect', { pitch: currentKey });
         }
 
-        // 接收伺服器廣播，同步更新介面狀態 (若有其他手機也在操作)
         socket.on('apply_effect', (data) => {
             if (data.pitch !== undefined) {
                 currentKey = data.pitch;
-                document.getElementById('key-val').innerText = currentKey === 0 ? "原 KEY (0)" : (currentKey > 0 ? "+" + currentKey : currentKey);
+                document.getElementById('key-val').innerText = currentKey === 0 ? "Original Key (0)" : (currentKey > 0 ? "+" + currentKey : currentKey);
             }
             if (data.volume !== undefined) {
                 document.getElementById('vol').value = data.volume;
