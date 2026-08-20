@@ -55,6 +55,15 @@ It is not a database-centric system. Instead, it is responsible for:
 
 ## 2. Real Feature Overview
 
+### 2.0 Recent Behavior Updates
+
+Recent updates in the current codebase include:
+
+- iPhone Chrome fullscreen compatibility in `/combo` with native fullscreen attempts plus an in-page pseudo-fullscreen fallback
+- unified queue-skip semantics so `cut`, `skip`, `stop`, and `next` can all trigger next-song behavior safely
+- lyrics search now persists manually entered title / artist / album into song metadata immediately
+- lyrics term loading now prefers saved metadata over filename parsing, preventing fallback to raw filename-based terms
+
 ### 2.1 Song Library Management
 
 The system scans the `ktv_songs` directory for `.mp4` files and treats them as playable resources.
@@ -116,6 +125,8 @@ Both `combo` and `player` support:
 - seeking to a specific time
 - fullscreen mode
 
+On iPhone browsers (including Chrome on iOS), `combo` also includes a pseudo-fullscreen fallback mode when native fullscreen is rejected by WebKit restrictions.
+
 ### 2.4 Lyrics Management
 
 The lyrics system is a complete local lyrics workflow:
@@ -128,6 +139,8 @@ The lyrics system is a complete local lyrics workflow:
 - renders synced lyric lists in `combo` and `remote`
 
 The current implementation also updates lyrics by playback time in the remote page, so it is no longer only a static text display.
+
+When searching lyrics in `combo`, manual title / artist / album inputs are now written back to metadata so later refreshes keep user-corrected values instead of reverting to filename-derived defaults.
 
 ### 2.5 Metadata and Cover Recognition
 
@@ -208,6 +221,8 @@ This store keeps index data for each song, including:
 - artist_image_url
 - completed
 - updated_at
+
+Metadata can be updated by multiple flows, including lyrics search input from the `combo` page.
 
 ### 3.3 Autofill Flow
 
@@ -393,6 +408,15 @@ Fix:
 
 - use Search Lyrics in the `combo` page
 - or place a `.lrc` file in the local song directory
+
+#### 4) iPhone Chrome fullscreen does not enter native fullscreen
+
+Cause: iOS/WebKit may reject native fullscreen on non-video containers or in some runtime states.
+
+Fix:
+
+- use the fullscreen button in `combo`
+- if native fullscreen is rejected, the page automatically falls back to in-page pseudo-fullscreen mode
 
 ---
 

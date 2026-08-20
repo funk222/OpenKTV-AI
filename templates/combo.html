@@ -141,6 +141,44 @@
             border-top: none;
             background: transparent;
         }
+        body.pseudo-fullscreen {
+            overflow: hidden;
+        }
+        body.pseudo-fullscreen #layout-splitter,
+        body.pseudo-fullscreen #remote-container {
+            display: none !important;
+        }
+        body.pseudo-fullscreen #player-container {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100dvh;
+            z-index: 9999;
+            background: #000;
+            flex: 1 1 auto;
+        }
+        body.pseudo-fullscreen #video-shell {
+            position: absolute;
+            inset: 0;
+        }
+        body.pseudo-fullscreen video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        body.pseudo-fullscreen #lyrics-box {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 44px;
+            width: 100%;
+            margin: 0;
+            padding: 16px 18px 20px;
+            min-height: 92px;
+            z-index: 60;
+            border-top: none;
+            background: transparent;
+        }
         .lyric-line { display: block; padding: 8px 14px; margin: 6px 0; border-radius: 10px; background: transparent; text-shadow: 0 2px 3px rgba(0,0,0,0.95), 0 0 14px rgba(0,0,0,0.85); }
         .lyric-current { font-size: clamp(24px, 3vw, 38px); font-weight: 800; color: #fff; letter-spacing: 0.2px; }
         .lyric-next { font-size: clamp(15px, 2vw, 22px); color: #e5e5e5; opacity: 0.95; }
@@ -337,10 +375,12 @@ const socket = io();
         const dockLyricsBtn = document.getElementById('dock-lyrics-btn');
         const dockOriginBtn = document.getElementById('dock-origin-btn');
         const dockInstBtn = document.getElementById('dock-inst-btn');
+        const dockFsBtn = document.getElementById('dock-fs-btn');
         const dockProgress = document.getElementById('dock-progress');
         const dockTimeCurrent = document.getElementById('dock-time-current');
         const dockTimeTotal = document.getElementById('dock-time-total');
         const layoutSplitter = document.getElementById('layout-splitter');
+        const remoteContainer = document.getElementById('remote-container');
         let audioCtx, source, splitter, gainL, gainR, merger, masterGain, pitchShift;
         let isAudioSetup = false;
         let currentMode = 'original';
@@ -873,13 +913,91 @@ const socket = io();
             }
         }
 
-        function toggleFullScreen() {
-            if (!document.fullscreenElement) {
-                if (playerContainer.requestFullscreen) playerContainer.requestFullscreen();
-                else if (playerContainer.webkitRequestFullscreen) playerContainer.webkitRequestFullscreen();
-            } else {
-                if (document.exitFullscreen) document.exitFullscreen();
+        function isNativeFullscreenActive() {
+            return !!(document.fullscreenElement || document.webkitFullscreenElement);
+        }
+
+        function isPseudoFullscreenActive() {
+            return document.body.classList.contains('pseudo-fullscreen');
+        }
+
+        function syncFullscreenButtonState() {
+            if (!dockFsBtn) return;
+            const active = isNativeFullscreenActive() || isPseudoFullscreenActive();
+            dockFsBtn.classList.toggle('active', active);
+            dockFsBtn.innerText = active ? '⤡' : '⛶';
+            dockFsBtn.title = active ? 'Exit Fullscreen' : 'Fullscreen';
+        }
+
+        function setPseudoFullscreen(active) {
+            document.body.classList.toggle('pseudo-fullscreen', !!active);
+            if (remoteContainer) {
+                remoteContainer.scrollTop = 0;
             }
+            syncFullscreenButtonState();
+            pingControlBar();
+        }
+
+        async function tryRequestFullscreen(target, methodName) {
+            if (!target || !methodName || typeof target[methodName] !== 'function') return false;
+            try {
+                const result = target[methodName]();
+                if (result && typeof result.then === 'function') {
+                    await result;
+                }
+                return true;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        async function toggleFullScreen() {
+            const isIOSChrome = /iPhone|iPad|iPod/i.test(navigator.userAgent) && /CriOS|Chrome/i.test(navigator.userAgent);
+
+            if (isPseudoFullscreenActive()) {
+                setPseudoFullscreen(false);
+                return;
+            }
+
+            if (isNativeFullscreenActive()) {
+                if (document.exitFullscreen) {
+                    try {
+                        await document.exitFullscreen();
+                    } catch (error) {
+                    }
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                }
+                syncFullscreenButtonState();
+                return;
+            }
+
+            const fullCandidates = isIOSChrome
+                ? [video, playerContainer, videoShell]
+                : [playerContainer, videoShell, video];
+            const uniqueCandidates = fullCandidates.filter((el, idx) => el && fullCandidates.indexOf(el) === idx);
+
+            for (const target of uniqueCandidates) {
+                if (await tryRequestFullscreen(target, 'requestFullscreen')) {
+                    syncFullscreenButtonState();
+                    return;
+                }
+                if (await tryRequestFullscreen(target, 'webkitRequestFullscreen')) {
+                    syncFullscreenButtonState();
+                    return;
+                }
+                if (await tryRequestFullscreen(target, 'mozRequestFullScreen')) {
+                    syncFullscreenButtonState();
+                    return;
+                }
+                if (await tryRequestFullscreen(target, 'webkitEnterFullscreen')) {
+                    syncFullscreenButtonState();
+                    return;
+                }
+            }
+
+            // On iOS Chrome, native fullscreen can be denied depending on state; use a reliable in-page fallback.
+            setPseudoFullscreen(true);
         }
 
         function initSystem(silent = false) {
@@ -1086,6 +1204,16 @@ const socket = io();
         initLayoutSplitter();
         refreshQuickTrackButtons();
         initControlBarAutoHide();
+        document.addEventListener('fullscreenchange', syncFullscreenButtonState);
+        document.addEventListener('webkitfullscreenchange', syncFullscreenButtonState);
+        video.addEventListener('webkitbeginfullscreen', syncFullscreenButtonState);
+        video.addEventListener('webkitendfullscreen', syncFullscreenButtonState);
+        window.addEventListener('orientationchange', () => {
+            if (isPseudoFullscreenActive()) {
+                pingControlBar();
+            }
+        });
+        syncFullscreenButtonState();
         videoShell.addEventListener('click', togglePauseByScreenTap);
         updateProgressUi();
         ensureAudioEngine();

@@ -288,6 +288,36 @@ def normalize_song_metadata_entry(filename, existing=None):
     return normalized
 
 
+def persist_song_metadata_terms(filename, title="", artist="", album=""):
+    safe_name = os.path.basename(str(filename or "")).strip()
+    if not safe_name:
+        return None
+
+    store = load_song_metadata_store()
+    entry = normalize_song_metadata_entry(safe_name, store.get(safe_name, {}))
+
+    incoming_title = str(title or "").strip()
+    incoming_artist = str(artist or "").strip()
+    incoming_album = str(album or "").strip()
+
+    if incoming_title:
+        entry["title"] = incoming_title
+    if incoming_artist:
+        entry["artist"] = incoming_artist
+    if incoming_album:
+        entry["album"] = incoming_album
+
+    if not str(entry.get("genre") or "").strip():
+        entry["genre"] = infer_genre_from_text(entry.get("title", ""), entry.get("artist", ""), entry.get("album", ""))
+
+    entry["completed"] = is_metadata_completed(entry)
+    entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    store[safe_name] = entry
+    save_song_metadata_store(store)
+    return entry
+
+
 def _artwork_to_large(url):
     if not url:
         return ""
@@ -481,35 +511,32 @@ def api_song_lyrics(filename):
 @app.route('/api/lyrics/match/<path:filename>', methods=['POST'])
 def api_match_song_lyrics(filename):
     try:
+        safe_name = os.path.basename(filename)
         payload = request.get_json(silent=True) or {}
         title = str(payload.get('title', '')).strip()
         artist = str(payload.get('artist', '')).strip()
         album = str(payload.get('album', '')).strip()
+
+        saved_entry = persist_song_metadata_terms(safe_name, title, artist, album) or {}
+        search_title = title or str(saved_entry.get('title') or '')
+        search_artist = artist or str(saved_entry.get('artist') or '')
+        search_album = album or str(saved_entry.get('album') or '')
+
         processor = KTVProcessor(log_cb=broadcast_log)
-        matches = processor.search_lyrics_candidates(title, artist, album)
-        return json.dumps({"ok": True, "matches": matches})
+        matches = processor.search_lyrics_candidates(search_title, search_artist, search_album)
+        return json.dumps({"ok": True, "matches": matches, "terms": {"title": search_title, "artist": search_artist, "album": search_album}})
     except Exception as exc:
         return json.dumps({"ok": False, "error": str(exc)}), 500
 
 @app.route('/api/lyrics/terms/<path:filename>')
 def api_lyrics_terms(filename):
     try:
-        base_name = os.path.splitext(os.path.basename(filename))[0]
-        artist = ""
-        album = ""
-        title = base_name
-
-        parts = [part.strip() for part in base_name.split(" - ") if part.strip()]
-        if len(parts) >= 3:
-            artist = parts[0]
-            album = parts[1]
-            title = " - ".join(parts[2:])
-        elif len(parts) == 2:
-            artist = parts[0]
-            title = parts[1]
+        safe_name = os.path.basename(filename)
+        store = load_song_metadata_store()
+        entry = normalize_song_metadata_entry(safe_name, store.get(safe_name, {}))
 
         processor = KTVProcessor(log_cb=broadcast_log)
-        terms = processor.extract_lyrics_search_terms(title, artist, album)
+        terms = processor.extract_lyrics_search_terms(entry.get('title', ''), entry.get('artist', ''), entry.get('album', ''))
         return json.dumps({"ok": True, "terms": terms})
     except Exception as exc:
         return json.dumps({"ok": False, "error": str(exc)}), 500
@@ -518,7 +545,8 @@ def api_lyrics_terms(filename):
 def api_save_lyrics(filename):
     try:
         payload = request.get_json(silent=True) or {}
-        base_name = os.path.splitext(os.path.basename(filename))[0]
+        safe_name = os.path.basename(filename)
+        base_name = os.path.splitext(safe_name)[0]
         if not base_name:
             return json.dumps({"ok": False, "error": "Invalid filename"}), 400
 
@@ -537,6 +565,13 @@ def api_save_lyrics(filename):
         lyric_path = os.path.join(SONGS_DIR, f"{base_name}.lrc")
         with open(lyric_path, "w", encoding="utf-8") as fh:
             fh.write(lrc_data)
+
+        persist_song_metadata_terms(
+            safe_name,
+            str(payload.get('title') or '').strip(),
+            str(payload.get('artist') or '').strip(),
+            str(payload.get('album') or '').strip(),
+        )
 
         return json.dumps({"ok": True, "saved": f"{base_name}.lrc"})
     except Exception as exc:
@@ -657,12 +692,13 @@ def handle_song_ended():
 
 @socketio.on('control')
 def handle_control(action):
-    if action == 'cut':
-        # 按下切歌時，等於強迫觸發「歌曲結束」事件，讓系統自動播下一首
+    normalized = str(action or '').strip().lower()
+    if normalized in {'cut', 'stop', 'skip', 'next'}:
+        # 多端按鈕命名可能不同，這些都視為「切到下一首」
         handle_song_ended()
     else:
         # 其他指令 (例如 pause) 照常發送
-        socketio.emit('command', action)
+        socketio.emit('command', normalized)
 
 # ------------------------------------------
 # (以下原本的音效與下載事件保留不動)
