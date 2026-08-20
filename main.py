@@ -1,8 +1,6 @@
 import sys
 import os
 import queue
-import re
-import glob
 
 # ==========================================
 # 【終極修復】修正 Bad file descriptor 崩潰問題
@@ -46,8 +44,10 @@ import shutil
 import threading
 import socket
 import json
+import re
 import time
 import webbrowser
+import urllib.request
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from flask import Flask, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -64,6 +64,17 @@ else:
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 FFMPEG_DIR = os.path.join(BASE_DIR, "ffmpeg", "bin")
 YT_DLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
+
+def get_runtime_python_executable():
+    candidates = [
+        os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe"),
+        os.path.join(BASE_DIR, ".venv", "bin", "python"),
+        sys.executable,
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return sys.executable
 
 def get_ffmpeg_executable():
     local_ffmpeg = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
@@ -110,7 +121,8 @@ def get_deno_executable():
 def get_ytdlp_command():
     if os.path.exists(YT_DLP_PATH):
         return [YT_DLP_PATH]
-    return [sys.executable, "-m", "yt_dlp"]
+    runtime_python = get_runtime_python_executable()
+    return [runtime_python, "-m", "yt_dlp"]
 
 RESOLVED_FFMPEG = get_ffmpeg_executable()
 if RESOLVED_FFMPEG:
@@ -124,6 +136,7 @@ os.environ["PATH"] += os.pathsep + BASE_DIR
 
 SONGS_DIR = os.path.join(BASE_DIR, "ktv_songs")
 TEMP_BASE_DIR = os.path.join(BASE_DIR, "temp_processing") 
+SONG_METADATA_PATH = os.path.join(SONGS_DIR, "_song_metadata.json")
 
 if not os.path.exists(SONGS_DIR): os.makedirs(SONGS_DIR)
 if not os.path.exists(TEMP_BASE_DIR): os.makedirs(TEMP_BASE_DIR)
@@ -147,6 +160,7 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 PORT = 5000
+APP_VERSION = "1.0.0"
 
 def broadcast_log(msg):
     # 用 print 就會自動被我們的 GUIWriter 抓走並顯示在介面上
@@ -185,14 +199,229 @@ def delete_song_file(filename):
         return False, False, f"Song not found: {filename}"
 
     os.remove(song_path)
-    lyric_path = os.path.splitext(song_path)[0] + '.lrc'
-    if os.path.exists(lyric_path):
-        try:
-            os.remove(lyric_path)
-        except:
-            pass
+
+    metadata = load_song_metadata_store()
+    if filename in metadata:
+        metadata.pop(filename, None)
+        save_song_metadata_store(metadata)
+
     removed_current = remove_song_from_queue(filename)
     return True, removed_current, filename
+
+
+def list_song_files():
+    return sorted([f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')])
+
+
+def load_song_metadata_store():
+    if not os.path.exists(SONG_METADATA_PATH):
+        return {}
+    try:
+        with open(SONG_METADATA_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_song_metadata_store(data):
+    safe = data if isinstance(data, dict) else {}
+    with open(SONG_METADATA_PATH, "w", encoding="utf-8") as fh:
+        json.dump(safe, fh, ensure_ascii=False, indent=2)
+
+
+def infer_genre_from_text(title="", artist="", album=""):
+    text = f"{title} {artist} {album}".lower()
+    genre_rules = [
+        ("k-pop|kpop|bts|blackpink|twice|ive|newjeans", "K-Pop"),
+        ("metal|slayer|iron maiden|metallica", "Metal"),
+        ("jazz|blues|sax|bossa", "Jazz/Blues"),
+        ("edm|house|trance|dubstep|techno", "EDM"),
+        ("hip hop|hip-hop|rap|drill", "Hip-Hop"),
+        ("rock|queen|rhcp|red hot chili peppers|nirvana", "Rock"),
+        ("acoustic|folk|ballad", "Acoustic/Folk"),
+        ("classical|orchestra|symphony|sonata", "Classical"),
+    ]
+    for pattern, genre in genre_rules:
+        if re.search(pattern, text):
+            return genre
+    return "Unknown"
+
+
+def parse_filename_metadata(filename):
+    raw = os.path.splitext(os.path.basename(filename))[0]
+    parts = [p.strip() for p in raw.split(" - ") if p.strip()]
+    if len(parts) >= 3:
+        return {"title": " - ".join(parts[2:]), "artist": parts[0], "album": parts[1]}
+    if len(parts) == 2:
+        return {"title": parts[1], "artist": parts[0], "album": ""}
+    return {"title": raw, "artist": "", "album": ""}
+
+
+def is_metadata_completed(entry):
+    # Completion rule (option 1): title + artist are enough.
+    if not isinstance(entry, dict):
+        return False
+    return bool(str(entry.get("title") or "").strip() and str(entry.get("artist") or "").strip())
+
+
+def normalize_song_metadata_entry(filename, existing=None):
+    existing = existing if isinstance(existing, dict) else {}
+    parsed = parse_filename_metadata(filename)
+    title = str(existing.get("title") or parsed["title"] or "").strip()
+    artist = str(existing.get("artist") or parsed["artist"] or "").strip()
+    album = str(existing.get("album") or parsed["album"] or "").strip()
+    genre = str(existing.get("genre") or "").strip()
+    artwork_url = str(existing.get("artwork_url") or "").strip()
+    artist_image_url = str(existing.get("artist_image_url") or "").strip()
+    normalized = {
+        "filename": filename,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "genre": genre,
+        "artwork_url": artwork_url,
+        "artist_image_url": artist_image_url,
+        "updated_at": existing.get("updated_at") or "",
+    }
+    normalized["completed"] = is_metadata_completed(normalized)
+    return normalized
+
+
+def _artwork_to_large(url):
+    if not url:
+        return ""
+    # Apple artwork URLs usually contain /100x100bb.jpg; upscale for gallery display.
+    return re.sub(r"/\d+x\d+bb", "/600x600bb", url)
+
+
+def fetch_artwork_metadata(title="", artist="", album=""):
+    query_parts = [p.strip() for p in [artist, album, title] if p and str(p).strip()]
+    if not query_parts:
+        return {"artwork_url": "", "artist_image_url": ""}
+
+    term = " ".join(query_parts)
+    params = urlencode({"term": term, "entity": "song", "limit": 8})
+    url = f"https://itunes.apple.com/search?{params}"
+
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception:
+        return {"artwork_url": "", "artist_image_url": ""}
+
+    results = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(results, list) or not results:
+        return {"artwork_url": "", "artist_image_url": ""}
+
+    artist_l = str(artist or "").lower()
+    album_l = str(album or "").lower()
+    title_l = str(title or "").lower()
+
+    best = None
+    best_score = -1
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        score = 0
+        r_artist = str(row.get("artistName") or "").lower()
+        r_album = str(row.get("collectionName") or "").lower()
+        r_title = str(row.get("trackName") or "").lower()
+        if artist_l and artist_l in r_artist:
+            score += 5
+        if album_l and album_l in r_album:
+            score += 4
+        if title_l and title_l in r_title:
+            score += 6
+        if score > best_score:
+            best = row
+            best_score = score
+
+    best = best or results[0]
+    raw_art = str(best.get("artworkUrl100") or best.get("artworkUrl60") or "").strip()
+    artwork = _artwork_to_large(raw_art)
+    return {"artwork_url": artwork, "artist_image_url": artwork}
+
+
+def build_song_metadata_snapshot():
+    songs = list_song_files()
+    store = load_song_metadata_store()
+    snapshot = {}
+    for filename in songs:
+        snapshot[filename] = normalize_song_metadata_entry(filename, store.get(filename, {}))
+    return snapshot
+
+
+def autofill_song_metadata():
+    songs = list_song_files()
+    store = load_song_metadata_store()
+    processor = KTVProcessor(log_cb=broadcast_log)
+    updated = 0
+    completed_before = 0
+    completed_after = 0
+
+    for filename in songs:
+        entry = normalize_song_metadata_entry(filename, store.get(filename, {}))
+        original = dict(entry)
+
+        terms = processor.extract_lyrics_search_terms(entry["title"], entry["artist"], entry["album"])
+        if not entry["title"] and terms.get("title"):
+            entry["title"] = terms["title"]
+        if not entry["artist"] and terms.get("artist"):
+            entry["artist"] = terms["artist"]
+        if not entry["album"] and terms.get("album"):
+            entry["album"] = terms["album"]
+
+        if not entry["artist"] or not entry["album"]:
+            try:
+                candidates = processor.search_lyrics_candidates(entry["title"], entry["artist"], entry["album"])
+                best = processor.rank_lyrics_candidates(entry["artist"], entry["title"], candidates) if candidates else None
+                if best:
+                    if not entry["artist"]:
+                        entry["artist"] = processor.normalize_space(str(best.get("artistName") or ""))
+                    if not entry["album"]:
+                        entry["album"] = processor.normalize_space(str(best.get("albumName") or ""))
+                    if entry["title"] in {"", os.path.splitext(filename)[0]}:
+                        candidate_title = processor.normalize_space(str(best.get("trackName") or ""))
+                        if candidate_title:
+                            entry["title"] = candidate_title
+            except Exception:
+                pass
+
+        if not entry["genre"]:
+            entry["genre"] = infer_genre_from_text(entry["title"], entry["artist"], entry["album"])
+
+        if not entry["artwork_url"] or not entry["artist_image_url"]:
+            art = fetch_artwork_metadata(entry["title"], entry["artist"], entry["album"])
+            if not entry["artwork_url"]:
+                entry["artwork_url"] = art.get("artwork_url", "")
+            if not entry["artist_image_url"]:
+                entry["artist_image_url"] = art.get("artist_image_url", "")
+
+        entry["completed"] = is_metadata_completed(entry)
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        if original.get("completed"):
+            completed_before += 1
+        if entry["completed"]:
+            completed_after += 1
+
+        if entry != original:
+            updated += 1
+        store[filename] = entry
+
+    stale_keys = [k for k in store.keys() if k not in songs]
+    for key in stale_keys:
+        store.pop(key, None)
+
+    save_song_metadata_store(store)
+    return {
+        "songs": len(songs),
+        "updated": updated,
+        "completed_before": completed_before,
+        "completed_after": completed_after,
+        "metadata": store,
+    }
 
 # ------------------------------------------
 # Flask 路由
@@ -204,7 +433,7 @@ def page_player(): return render_template('player.html')
 def page_remote(): return render_template('remote.html')
 
 @app.route('/admin')
-def page_admin(): return render_template('admin.html')
+def page_admin(): return render_template('admin.html', local_ip=LOCAL_IP, local_port=PORT, app_version=APP_VERSION)
 
 @app.route('/combo')  
 def page_combo(): return render_template('combo.html')
@@ -216,15 +445,131 @@ def page_index(): return render_template('remote.html')
 def serve_song(filename):
     return send_from_directory(SONGS_DIR, filename)
 
-
 @app.route('/lyrics/<path:filename>')
 def serve_lyrics(filename):
-    return send_from_directory(SONGS_DIR, filename)
+    safe_name = os.path.basename(filename)
+    if not safe_name.lower().endswith('.lrc'):
+        safe_name = f"{safe_name}.lrc"
+    lyric_path = os.path.abspath(os.path.join(SONGS_DIR, safe_name))
+    songs_root = os.path.abspath(SONGS_DIR)
+    if not lyric_path.startswith(songs_root + os.sep) and lyric_path != songs_root:
+        return "", 404
+
+    if not os.path.exists(lyric_path):
+        song_base = os.path.splitext(safe_name)[0]
+        song_path = os.path.join(SONGS_DIR, f"{song_base}.mp4")
+        if os.path.exists(song_path):
+            processor = KTVProcessor(log_cb=broadcast_log)
+            generated = processor.save_lyrics_for_song(song_path, song_base, "", "")
+            if generated and os.path.exists(generated):
+                lyric_path = generated
+
+    if not os.path.exists(lyric_path):
+        return "", 404
+    return send_from_directory(SONGS_DIR, os.path.basename(lyric_path), mimetype='text/plain; charset=utf-8')
+
+@app.route('/api/lyrics/<path:filename>')
+def api_song_lyrics(filename):
+    safe_name = os.path.basename(filename)
+    base_name = os.path.splitext(safe_name)[0]
+    lyric_path = os.path.join(SONGS_DIR, f"{base_name}.lrc")
+    if not os.path.exists(lyric_path):
+        return json.dumps({"ok": False, "error": "No local lyrics found"})
+    with open(lyric_path, "r", encoding="utf-8", errors="replace") as fh:
+        return json.dumps({"ok": True, "filename": f"{base_name}.lrc", "content": fh.read()})
+
+@app.route('/api/lyrics/match/<path:filename>', methods=['POST'])
+def api_match_song_lyrics(filename):
+    try:
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get('title', '')).strip()
+        artist = str(payload.get('artist', '')).strip()
+        album = str(payload.get('album', '')).strip()
+        processor = KTVProcessor(log_cb=broadcast_log)
+        matches = processor.search_lyrics_candidates(title, artist, album)
+        return json.dumps({"ok": True, "matches": matches})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+@app.route('/api/lyrics/terms/<path:filename>')
+def api_lyrics_terms(filename):
+    try:
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        artist = ""
+        album = ""
+        title = base_name
+
+        parts = [part.strip() for part in base_name.split(" - ") if part.strip()]
+        if len(parts) >= 3:
+            artist = parts[0]
+            album = parts[1]
+            title = " - ".join(parts[2:])
+        elif len(parts) == 2:
+            artist = parts[0]
+            title = parts[1]
+
+        processor = KTVProcessor(log_cb=broadcast_log)
+        terms = processor.extract_lyrics_search_terms(title, artist, album)
+        return json.dumps({"ok": True, "terms": terms})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+@app.route('/api/lyrics/save/<path:filename>', methods=['POST'])
+def api_save_lyrics(filename):
+    try:
+        payload = request.get_json(silent=True) or {}
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        if not base_name:
+            return json.dumps({"ok": False, "error": "Invalid filename"}), 400
+
+        candidate = payload.get('candidate') if isinstance(payload.get('candidate'), dict) else {}
+        lyrics_text = str(payload.get('lyrics') or "").strip()
+        if not lyrics_text:
+            lyrics_text = str(candidate.get('syncedLyrics') or candidate.get('plainLyrics') or "").strip()
+        if not lyrics_text:
+            return json.dumps({"ok": False, "error": "No lyrics content to save"}), 400
+
+        processor = KTVProcessor(log_cb=broadcast_log)
+        lrc_data = processor.generate_lrc_from_lyrics(lyrics_text)
+        if not lrc_data:
+            return json.dumps({"ok": False, "error": "Could not generate valid .lrc content"}), 400
+
+        lyric_path = os.path.join(SONGS_DIR, f"{base_name}.lrc")
+        with open(lyric_path, "w", encoding="utf-8") as fh:
+            fh.write(lrc_data)
+
+        return json.dumps({"ok": True, "saved": f"{base_name}.lrc"})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+@app.route('/api/lyrics/delete/<path:filename>', methods=['POST'])
+def api_delete_lyrics(filename):
+    base_name = os.path.splitext(os.path.basename(filename))[0]
+    lyric_path = os.path.join(SONGS_DIR, f"{base_name}.lrc")
+    if not os.path.exists(lyric_path):
+        return json.dumps({"ok": False, "error": "Lyrics file not found"})
+    os.remove(lyric_path)
+    return json.dumps({"ok": True, "deleted": f"{base_name}.lrc"})
 
 @app.route('/api/list')
 def get_song_list():
     songs = [f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')]
     return json.dumps(songs) 
+
+
+@app.route('/api/metadata')
+def api_song_metadata():
+    snapshot = build_song_metadata_snapshot()
+    return json.dumps({"ok": True, "metadata": snapshot})
+
+
+@app.route('/api/metadata/autofill', methods=['POST'])
+def api_metadata_autofill():
+    try:
+        result = autofill_song_metadata()
+        return json.dumps({"ok": True, **result})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
 
 
 @app.route('/api/delete/<path:filename>', methods=['POST'])
@@ -233,158 +578,26 @@ def delete_song_api(filename):
         success, removed_current, result = delete_song_file(filename)
         if not success:
             return json.dumps({'ok': False, 'error': result}), 404
-
-        broadcast_log(f"🗑️ Deleted song: {result}")
-
-        return json.dumps({'ok': True})
+        return json.dumps({'ok': True, 'removed_current': removed_current, 'result': result})
     except Exception as exc:
-        broadcast_log(f"❌ Failed to delete song via API: {exc}")
         return json.dumps({'ok': False, 'error': str(exc)}), 500
 
-
-def save_song_lyrics(song_filename, lyrics_text):
-    song_filename = os.path.basename(str(song_filename).strip())
-    if not song_filename.lower().endswith('.mp4'):
-        raise ValueError('Invalid song filename')
-
-    lyric_path = os.path.join(SONGS_DIR, os.path.splitext(song_filename)[0] + '.lrc')
-    with open(lyric_path, 'w', encoding='utf-8') as lyric_file:
-        lyric_file.write(str(lyrics_text or '').replace('\r\n', '\n').replace('\r', '\n').strip())
-
-
-def is_youtube_url(url):
-    parsed = urlparse(str(url or '').strip())
-    return 'youtube.com' in parsed.netloc or 'youtu.be' in parsed.netloc
-
-
-def format_lrc_timestamp(total_seconds):
-    total_seconds = max(0.0, float(total_seconds or 0.0))
-    minutes = int(total_seconds // 60)
-    seconds = int(total_seconds % 60)
-    milliseconds = int(round((total_seconds - int(total_seconds)) * 1000))
-    if milliseconds >= 1000:
-        minutes += 1
-        milliseconds -= 1000
-    return f"[{minutes:02d}:{seconds:02d}.{milliseconds:03d}]"
-
-
-def subtitle_timestamp_to_seconds(timestamp_text):
-    cleaned = str(timestamp_text or '').strip().replace(',', '.')
-    if not cleaned:
-        return None
-
-    parts = cleaned.split(':')
-    if len(parts) == 3:
-        hours_text, minutes_text, seconds_text = parts
-    elif len(parts) == 2:
-        hours_text = '0'
-        minutes_text, seconds_text = parts
-    else:
-        return None
-
-    try:
-        hours = int(hours_text)
-        minutes = int(minutes_text)
-        seconds = float(seconds_text)
-    except ValueError:
-        return None
-
-    return hours * 3600 + minutes * 60 + seconds
-
-
-def subtitles_to_lrc(subtitle_text):
-    blocks = re.split(r'\n\s*\n', str(subtitle_text or '').strip(), flags=re.MULTILINE)
-    lyrics_lines = []
-
-    for block in blocks:
-        lines = [line.strip('\ufeff').strip() for line in block.splitlines() if line.strip()]
-        if not lines:
-            continue
-
-        timing_index = next((idx for idx, line in enumerate(lines) if '-->' in line), None)
-        if timing_index is None:
-            continue
-
-        match = re.search(
-            r'(?P<start>\d{1,2}:\d{2}(?::\d{2})?[\.,]\d{1,3})\s*-->\s*(?P<end>\d{1,2}:\d{2}(?::\d{2})?[\.,]\d{1,3})',
-            lines[timing_index],
-        )
-        if not match:
-            continue
-
-        start_seconds = subtitle_timestamp_to_seconds(match.group('start'))
-        if start_seconds is None:
-            continue
-
-        lyric_text = ' '.join(lines[timing_index + 1:]).strip()
-        if not lyric_text:
-            continue
-
-        lyrics_lines.append(f"{format_lrc_timestamp(start_seconds)}{lyric_text}")
-
-    return '\n'.join(lyrics_lines).strip()
-
-
-def extract_youtube_caption_lyrics(source_url, temp_dir):
-    if not is_youtube_url(source_url):
-        return None
-
-    subtitle_dir = os.path.join(temp_dir, 'captions')
-    os.makedirs(subtitle_dir, exist_ok=True)
-
-    cmd = get_ytdlp_command() + [
-        '--skip-download',
-        '--write-subs',
-        '--write-auto-subs',
-        '--sub-langs', 'all',
-        '--sub-format', 'vtt',
-        '-o', os.path.join(subtitle_dir, 'captions.%(ext)s'),
-        source_url,
-    ]
-
-    deno_executable = get_deno_executable()
-    if deno_executable:
-        cmd += ['--js-runtimes', f'deno:{deno_executable}', '--remote-components', 'ejs:github']
-
-    try:
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-        )
-    except subprocess.CalledProcessError:
-        return None
-
-    subtitle_candidates = []
-    for ext in ('vtt', 'srt', 'ass'):
-        subtitle_candidates.extend(sorted(glob.glob(os.path.join(subtitle_dir, f'*.{ext}'))))
-
-    if not subtitle_candidates:
-        return None
-
-    for subtitle_path in subtitle_candidates:
-        try:
-            with open(subtitle_path, 'r', encoding='utf-8', errors='replace') as subtitle_file:
-                subtitle_text = subtitle_file.read()
-            timed_lyrics = subtitles_to_lrc(subtitle_text)
-            if timed_lyrics:
-                return timed_lyrics
-        except Exception:
-            continue
-
-    return None
-
-
-def lyrics_file_exists(song_filename):
-    lyric_path = os.path.join(SONGS_DIR, os.path.splitext(os.path.basename(song_filename))[0] + '.lrc')
-    return os.path.exists(lyric_path)
 
 # ------------------------------------------
 # SocketIO 事件處理 & 待播清單
 # ------------------------------------------
 playlist_queue = []
+current_playback_state = {'filename': '', 'seconds': 0.0}
+
+@socketio.on('song_status')
+def handle_song_status(data):
+    filename = str((data or {}).get('filename') or '').strip()
+    seconds = float((data or {}).get('seconds', 0) or 0)
+    if not filename:
+        return
+    current_playback_state['filename'] = filename
+    current_playback_state['seconds'] = max(0.0, seconds)
+    socketio.emit('song_status', {'filename': filename, 'seconds': current_playback_state['seconds']})
 
 @socketio.on('add_to_queue')
 def handle_add_queue(data):
@@ -396,7 +609,10 @@ def handle_add_queue(data):
     
     # 如果清單裡面只有剛點的這首歌，代表目前沒有歌在播，立刻開始播放
     if len(playlist_queue) == 1:
+        current_playback_state['filename'] = filename
+        current_playback_state['seconds'] = 0.0
         socketio.emit('play_video', {'filename': filename, 'title': filename})
+        socketio.emit('song_status', {'filename': filename, 'seconds': 0.0})
 
 @socketio.on('request_play')
 def handle_request_play(data):
@@ -503,23 +719,14 @@ def run_download_job(job):
 
     url = job.get('url', '')
     title = job.get('title', '')
-    lyrics = job.get('lyrics', '')
 
     broadcast_log("=== Starting new job ===")
 
     try:
         processor = KTVProcessor(log_cb=broadcast_log)
-        final_result = processor.process_song(url, title)
+        final_filename = processor.process_song(url, title)
 
-        if final_result:
-            final_filename, extracted_lyrics = final_result
-            lyrics_to_save = extracted_lyrics or (lyrics if lyrics and str(lyrics).strip() else '')
-            if lyrics_to_save and str(lyrics_to_save).strip():
-                try:
-                    save_song_lyrics(final_filename, lyrics_to_save)
-                    broadcast_log(f"📝 Lyrics saved for: {final_filename}")
-                except Exception as exc:
-                    broadcast_log(f"⚠️ Lyrics save failed: {exc}")
+        if final_filename:
             socketio.emit('refresh_list')
     except Exception as exc:
         broadcast_log(f"❌ Process failed: {exc}")
@@ -538,8 +745,9 @@ def _run_demucs_process(input_path, output_dir, log_path):
     這個函式會在一個完全獨立的 Python 進程中執行。
     結束時作業系統會強制清空此進程佔用的 PyTorch 記憶體。
     """
+    runtime_python = get_runtime_python_executable()
     cmd = [
-        sys.executable,
+        runtime_python,
         "-m",
         "demucs",
         "--two-stems",
@@ -574,17 +782,17 @@ def _run_demucs_process(input_path, output_dir, log_path):
 def handle_start_download(data):
     url = str((data or {}).get('url', '')).strip()
     title = str((data or {}).get('title', '')).strip()
-    lyrics = (data or {}).get('lyrics', '')
 
-    if not url or not title:
-        broadcast_log("⚠️ Upload skipped: URL and title are required.")
+    if not url:
+        broadcast_log("⚠️ Upload skipped: URL is required.")
         return
 
     with download_queue_lock:
-        download_queue.append({'url': url, 'title': title, 'lyrics': lyrics})
+        download_queue.append({'url': url, 'title': title})
         waiting_count = len(download_queue)
 
-    broadcast_log(f"📥 Queued: {title} (waiting in queue: {waiting_count})")
+    display_name = title or "auto-detected metadata"
+    broadcast_log(f"📥 Queued: {display_name} (waiting in queue: {waiting_count})")
     try_start_next_download()
 
 @socketio.on('update_ytdlp')
@@ -626,7 +834,399 @@ class KTVProcessor:
         self.log = log_cb
 
     def sanitize_filename(self, name):
-        return "".join([c for c in name if c not in r'\/:*?"<>|'])
+        cleaned = "".join([c for c in (name or "") if c not in r'\\/:*?\"<>|'])
+        cleaned = cleaned.replace("\r", " ").replace("\n", " ")
+        cleaned = " ".join(cleaned.split())
+        return cleaned.strip(" .-")
+
+    def normalize_space(self, value):
+        return " ".join((value or "").split())
+
+    def tokenize_for_match(self, value):
+        words = re.findall(r"[a-z0-9]+", self.normalize_space(str(value or "")).lower())
+        stop = {"the", "a", "an", "and", "of", "for", "to", "in", "on", "feat", "ft", "featuring"}
+        return [w for w in words if w not in stop]
+
+    def clean_lyrics_metadata_text(self, value, is_artist=False):
+        text = self.normalize_space(value or "")
+        if not text:
+            return ""
+
+        # Remove common auto-generated numeric suffixes, e.g. "_1787176680".
+        text = re.sub(r"[_\-]\d{6,}$", "", text).strip()
+
+        noise_words = (
+            r"official",
+            r"music\s+video",
+            r"video",
+            r"audio",
+            r"lyric(?:s)?",
+            r"visualizer",
+            r"mv",
+            r"hd",
+            r"4k",
+            r"hq",
+            r"remaster(?:ed)?(?:\s*\d{4})?",
+            r"live",
+        )
+        noise_pattern = "|".join(noise_words)
+
+        def strip_noisy_brackets(match):
+            inner = self.normalize_space(match.group(1)).lower()
+            return " " if re.search(rf"\b(?:{noise_pattern})\b", inner) else match.group(0)
+
+        # Keep meaningful brackets like "[Hey Oh]", but remove noisy ones like "[Official Video]".
+        text = re.sub(r"\s*[\[(\{]([^\]\)\}]{1,120})[\]\)\}]", strip_noisy_brackets, text)
+
+        # Remove trailing promo tags outside brackets.
+        text = re.sub(rf"\s*[-|:]+\s*(?:{noise_pattern})\b.*$", "", text, flags=re.I)
+
+        # Trim featured artist suffixes for cleaner matching.
+        text = re.sub(r"\s*(?:ft\.?|feat\.?|featuring)\s+.+$", "", text, flags=re.I)
+
+        if is_artist:
+            # Remove common channel suffixes from uploader names.
+            text = re.sub(r"\s*-\s*topic$", "", text, flags=re.I)
+            text = re.sub(r"\s*official(?:\s+channel)?$", "", text, flags=re.I)
+            text = re.sub(r"\s*vevo$", "", text, flags=re.I)
+
+        return self.normalize_space(text).strip(" -_|")
+
+    def extract_title_parts(self, raw_title):
+        title = self.normalize_space(raw_title or "")
+        title = re.sub(r"^(?:official\s+)?(?:music\s+video|audio)\s*[:\-]?\s*", "", title, flags=re.I)
+        title = re.sub(r"\s*\((?:official\s+)?(?:music\s+video|audio|lyric\s+video)\)\s*$", "", title, flags=re.I)
+        if not title:
+            return "", "", ""
+
+        if " - " in title:
+            parts = [p.strip() for p in title.split(" - ") if p.strip()]
+            if len(parts) >= 3:
+                artist = parts[0]
+                album = parts[1]
+                song = " - ".join(parts[2:])
+                return artist, album, song
+            if len(parts) == 2:
+                left, right = parts
+                common_title_words = {
+                    "hello", "love", "forever", "goodbye", "sorry", "alone", "summer", "winter",
+                    "beautiful", "fire", "dream", "song", "track", "music", "memory", "light",
+                    "time", "angel", "night", "day", "heart", "party", "star", "rain", "shine",
+                    "happier", "together", "dangerous", "broken", "stuck", "perfect", "change",
+                }
+                left_words = set(left.lower().split())
+                right_words = set(right.lower().split())
+                left_is_title = bool(left_words & common_title_words) or left.lower() in common_title_words
+                if left_is_title and not (right_words & common_title_words):
+                    return right, "", left
+                return left, "", right
+
+        return "", "", title
+
+    def infer_artist_album_title(self, raw_title):
+        artist, album, song = self.extract_title_parts(raw_title)
+        return artist, album, song
+
+    def build_song_filename(self, title, artist="", album=""):
+        if title:
+            inferred_artist, inferred_album, inferred_song = self.infer_artist_album_title(title)
+            if not artist:
+                artist = inferred_artist
+            if not album:
+                album = inferred_album
+            title = inferred_song or title
+
+        title = self.normalize_space(title) or "Unknown Song"
+        artist = self.normalize_space(artist)
+        album = self.normalize_space(album)
+
+        if artist and album and title:
+            candidate = f"{artist} - {album} - {title}"
+        elif artist and title:
+            candidate = f"{artist} - {title}"
+        elif album and title:
+            candidate = f"{album} - {title}"
+        else:
+            candidate = title
+
+        cleaned = self.sanitize_filename(candidate)
+        if not cleaned:
+            cleaned = "Unknown Song"
+        return cleaned.strip(" -")
+
+    def extract_lyrics_search_terms(self, title="", artist="", album=""):
+        title = self.clean_lyrics_metadata_text(title or "")
+        artist = self.clean_lyrics_metadata_text(artist or "", is_artist=True)
+        album = self.clean_lyrics_metadata_text(album or "")
+
+        inferred_artist, inferred_album, inferred_song = self.infer_artist_album_title(title)
+        if not artist and inferred_artist:
+            artist = inferred_artist
+        if not album and inferred_album:
+            album = inferred_album
+
+        if not title and artist and album:
+            title = album
+
+        track_name = self.clean_lyrics_metadata_text(inferred_song or title or "Unknown Song")
+        title = track_name
+        artist = self.clean_lyrics_metadata_text(artist or inferred_artist or "", is_artist=True)
+        album = self.clean_lyrics_metadata_text(album or inferred_album or "")
+
+        return {
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "track": track_name,
+        }
+
+    def rank_lyrics_candidates(self, artist, title, candidates):
+        def match_score(candidate):
+            artist_key = self.normalize_space(artist or "").lower()
+            title_key = self.normalize_space(title or "").lower()
+            artist_name = self.normalize_space(str(candidate.get("artistName") or "")).lower()
+            track_name = self.normalize_space(str(candidate.get("trackName") or "")).lower()
+            score = 0
+            if artist_key and artist_name:
+                if artist_key == artist_name:
+                    score += 30
+                elif artist_key in artist_name or artist_name in artist_key:
+                    score += 18
+            if title_key and track_name:
+                if title_key == track_name:
+                    score += 50
+                elif title_key in track_name or track_name in title_key:
+                    score += 30
+            if artist_key and title_key and artist_key in track_name and title_key in artist_name:
+                score += 10
+            return score
+
+        artist_key = self.normalize_space(artist or "").lower()
+        title_key = self.normalize_space(title or "").lower()
+        ranked = []
+        for candidate in candidates:
+            artist_name = self.normalize_space(str(candidate.get("artistName") or "")).lower()
+            track_name = self.normalize_space(str(candidate.get("trackName") or "")).lower()
+            score = match_score(candidate)
+            ranked.append((score, candidate))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1] if ranked else None
+
+    def search_lyrics_candidates(self, title="", artist="", album=""):
+        terms = self.extract_lyrics_search_terms(title, artist, album)
+        artist_term = terms["artist"]
+        track_term = terms["track"]
+        album_term = terms["album"]
+
+        candidates = []
+        query_variants = []
+        if artist_term and track_term:
+            query_variants.extend([
+                (artist_term, track_term),
+                (track_term, artist_term),
+                (artist_term, f"{track_term} {album_term}") if album_term else (artist_term, track_term),
+            ])
+        if track_term:
+            query_variants.append(("", track_term))
+        if artist_term:
+            query_variants.append((artist_term, ""))
+
+        q_variants = []
+        if artist_term and track_term:
+            q_variants.append(f"{artist_term} {track_term}")
+            q_variants.append(f"{track_term} {artist_term}")
+        if track_term:
+            q_variants.append(track_term)
+        if artist_term and album_term:
+            q_variants.append(f"{artist_term} {album_term} {track_term}".strip())
+
+        request_param_variants = []
+        for artist_value, track_value in query_variants:
+            params = {}
+            if track_value:
+                params["track"] = track_value
+            if artist_value:
+                params["artist"] = artist_value
+            if album_term and not artist_value:
+                params["album"] = album_term
+            if params:
+                request_param_variants.append(params)
+
+        for q_value in q_variants:
+            q_value = self.normalize_space(q_value)
+            if q_value:
+                request_param_variants.append({"q": q_value})
+
+        seen_queries = set()
+        for params in request_param_variants:
+            if not params:
+                continue
+            q_key = tuple(sorted((k, self.normalize_space(str(v)).lower()) for k, v in params.items()))
+            if q_key in seen_queries:
+                continue
+            seen_queries.add(q_key)
+            try:
+                request_url = "https://lrclib.net/api/search?" + urlencode(params)
+                req = urllib.request.Request(request_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                    if isinstance(payload, list):
+                        candidates.extend(payload)
+            except Exception:
+                pass
+
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            key = (str(candidate.get("artistName") or "").lower(), str(candidate.get("trackName") or "").lower(), str(candidate.get("plainLyrics") or candidate.get("syncedLyrics") or "").lower())
+            if key not in seen:
+                unique.append(candidate)
+                seen.add(key)
+
+        if not unique:
+            return []
+
+        artist_key = self.normalize_space(artist_term).lower()
+        track_key = self.normalize_space(track_term).lower()
+        artist_tokens = self.tokenize_for_match(artist_term)
+        track_tokens = self.tokenize_for_match(track_term)
+
+        def relevance_score(item):
+            artist_name = self.normalize_space(str(item.get("artistName") or "")).lower()
+            track_name = self.normalize_space(str(item.get("trackName") or "")).lower()
+            score = 0
+
+            if artist_key and artist_name:
+                if artist_key == artist_name:
+                    score += 45
+                elif artist_key in artist_name or artist_name in artist_key:
+                    score += 25
+
+            if track_key and track_name:
+                if track_key == track_name:
+                    score += 60
+                elif track_key in track_name or track_name in track_key:
+                    score += 35
+
+            if artist_tokens:
+                artist_overlap = sum(1 for token in artist_tokens if token in artist_name)
+                score += int((artist_overlap / max(len(artist_tokens), 1)) * 30)
+                if artist_key and artist_overlap == 0:
+                    score -= 20
+
+            if track_tokens:
+                title_overlap = sum(1 for token in track_tokens if token in track_name)
+                score += int((title_overlap / max(len(track_tokens), 1)) * 35)
+                if track_key and title_overlap == 0:
+                    score -= 30
+
+            return score
+
+        ranked = sorted(unique, key=relevance_score, reverse=True)
+        strong = [item for item in ranked if relevance_score(item) > 0]
+        return strong or ranked
+
+    def fetch_lyrics_text(self, title="", artist="", album=""):
+        terms = self.extract_lyrics_search_terms(title, artist, album)
+        artist_term = terms["artist"]
+        track_term = terms["track"]
+        album_term = terms["album"]
+        candidates = self.search_lyrics_candidates(track_term, artist_term, album_term)
+        if not candidates:
+            return None
+        best_match = self.rank_lyrics_candidates(artist_term, track_term, candidates)
+        if not best_match:
+            return None
+        lyrics_text = (best_match.get("syncedLyrics") or best_match.get("plainLyrics") or "").strip()
+        return lyrics_text or None
+
+    def generate_lrc_from_lyrics(self, lyrics_text):
+        if lyrics_text is None:
+            return ""
+        normalized = str(lyrics_text).replace("\r\n", "\n").replace("\r", "\n")
+        if re.search(r"\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]", normalized):
+            filtered = []
+            for raw_line in normalized.split("\n"):
+                stripped = raw_line.strip()
+                if stripped and re.search(r"\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]", stripped):
+                    filtered.append(stripped)
+            return ("\n".join(filtered) + "\n") if filtered else ""
+
+        lines = []
+        for raw_line in normalized.split("\n"):
+            clean_line = raw_line.strip()
+            if not clean_line:
+                continue
+            if re.match(r"^(?:\[.*\]|https?://|\(.*\))", clean_line):
+                continue
+            lines.append(clean_line)
+
+        if not lines:
+            return ""
+
+        lrc_lines = []
+        for index, line in enumerate(lines):
+            seconds = max(0, index * 4)
+            minutes, remaining = divmod(seconds, 60)
+            lrc_lines.append(f"[{minutes:02d}:{remaining:02d}.000]{line}")
+        return "\n".join(lrc_lines) + "\n"
+
+    def save_lyrics_for_song(self, song_filename, title="", artist="", album="", force=False):
+        if not song_filename:
+            return None
+        base_name = os.path.splitext(os.path.basename(song_filename))[0]
+        lyric_output = os.path.join(SONGS_DIR, f"{base_name}.lrc")
+        if os.path.exists(lyric_output) and not force:
+            return lyric_output
+        lyrics_text = self.fetch_lyrics_text(title, artist, album)
+        if not lyrics_text:
+            return None
+        lrc_data = self.generate_lrc_from_lyrics(lyrics_text)
+        if not lrc_data:
+            return None
+        with open(lyric_output, "w", encoding="utf-8") as lyric_file:
+            lyric_file.write(lrc_data)
+        return lyric_output
+
+    def resolve_song_metadata(self, url, fallback_title=""):
+        fallback_title = (fallback_title or "").strip()
+        metadata = {"title": fallback_title, "artist": "", "album": ""}
+        try:
+            cmd = get_ytdlp_command() + [
+                "--skip-download",
+                "--no-warnings",
+                "--dump-single-json",
+                url,
+            ]
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
+            data = json.loads(result.stdout or "{}")
+            title = self.normalize_space((data.get("title") or fallback_title or "").strip())
+            artist = self.normalize_space((data.get("artist") or data.get("uploader") or "").strip())
+            album = self.normalize_space((data.get("album") or "").strip())
+            metadata["title"] = title
+            metadata["artist"] = artist
+            metadata["album"] = album
+
+            inferred_artist, inferred_album, inferred_song = self.infer_artist_album_title(title)
+            if not metadata["artist"] and inferred_artist:
+                metadata["artist"] = inferred_artist
+            if not metadata["album"] and inferred_album:
+                metadata["album"] = inferred_album
+            if inferred_song and inferred_song != metadata["title"]:
+                metadata["title"] = inferred_song
+        except Exception:
+            pass
+
+        title = self.normalize_space(metadata["title"] or fallback_title or "Unknown Song")
+        artist = self.normalize_space(metadata["artist"])
+        album = self.normalize_space(metadata["album"])
+        return title, artist, album
 
     def normalize_youtube_url(self, url):
         parsed = urlparse(url)
@@ -649,8 +1249,9 @@ class KTVProcessor:
         job_temp_dir = None
         job_succeeded = False
         try:
-            safe_title = self.sanitize_filename(manual_title)
             normalized_url = self.normalize_youtube_url(url)
+            resolved_title, resolved_artist, resolved_album = self.resolve_song_metadata(normalized_url, manual_title)
+            safe_title = self.build_song_filename(resolved_title, resolved_artist, resolved_album)
             self.log(f"Target song: {safe_title}")
             if normalized_url != url:
                 self.log("Normalized the YouTube URL to improve download stability")
@@ -695,10 +1296,6 @@ class KTVProcessor:
                 if "video unavailable" in lowered_output or "restricted" in lowered_output or "private video" in lowered_output:
                     raise Exception("YouTube is blocking this video for your account, workspace, or network. Try a different video or sign in with an account that has access.")
                 raise Exception(f"yt-dlp download failed with code {exc.returncode}")
-
-            extracted_lyrics = extract_youtube_caption_lyrics(normalized_url, job_temp_dir)
-            if extracted_lyrics:
-                self.log("🎬 Extracted YouTube captions for timed lyrics.")
 
             self.log("Step 2/4: AI vocal separation (Demucs)... (this may take a while)")
             
@@ -753,10 +1350,15 @@ class KTVProcessor:
                 final = os.path.join(SONGS_DIR, f"{safe_title}_{job_id}.mp4")
 
             shutil.move(temp_output, final)
+            lyrics_path = self.save_lyrics_for_song(os.path.basename(final), resolved_title, resolved_artist, resolved_album)
+            if lyrics_path:
+                self.log(f"🎵 Matched synced lyrics for {os.path.basename(final)}")
+            else:
+                self.log("🎵 No lyrics match was found for this song; the audio file is still saved.")
             
             self.log("✅ Processing complete. The song has been added to the library.")
             job_succeeded = True
-            return os.path.basename(final), extracted_lyrics
+            return os.path.basename(final)
 
         except subprocess.CalledProcessError as e:
             self.log(f"❌ Process failed (Code {e.returncode})")
@@ -857,9 +1459,17 @@ if __name__ == "__main__":
         except:
             print("FFmpeg not found")
     else:
-        t = threading.Thread(target=run_server_thread)
-        t.daemon = True
-        t.start()
-        
-        app = ServerApp()
-        app.mainloop()
+        headless = str(os.environ.get("KTV_HEADLESS", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if headless:
+            run_server_thread()
+        else:
+            try:
+                t = threading.Thread(target=run_server_thread)
+                t.daemon = True
+                t.start()
+
+                app = ServerApp()
+                app.mainloop()
+            except Exception as exc:
+                print(f"⚠️ GUI mode unavailable ({exc}). Falling back to headless server mode.")
+                run_server_thread()

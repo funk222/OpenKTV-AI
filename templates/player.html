@@ -6,6 +6,7 @@
         body { background: #000; margin: 0; overflow: hidden; display: flex; justify-content: center; align-items: stretch; height: 100vh; color: #fff; font-family: Arial; }
         #player-wrap { width: 100%; height: 100%; display: flex; flex-direction: column; min-height: 0; }
         #video-shell { position: relative; flex: 1 1 auto; min-height: 0; }
+        #lyrics-box { display: block; }
         video { width: 100%; height: 100%; object-fit: contain; display: block; }
         #overlay { position: absolute; top: 20px; left: 20px; font-size: 24px; text-shadow: 2px 2px 4px #000; z-index: 10; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;}
         #lyrics-box { width: min(92vw, 900px); text-align: center; z-index: 12; pointer-events: none; margin: 10px auto 18px; padding: 10px 12px; box-sizing: border-box; border-top: 1px solid rgba(255,255,255,0.12); min-height: 88px; }
@@ -35,57 +36,25 @@
         const video = document.getElementById('vid');
         const overlay = document.getElementById('overlay');
         const waiting = document.getElementById('waiting');
-        const lyricsBox = document.getElementById('lyrics-box');
-        const lyricCurrent = document.getElementById('lyric-current');
-        const lyricNext = document.getElementById('lyric-next');
-        
         let audioCtx, source, splitter, gainL, gainR, merger;
         let isAudioSetup = false;
         let currentMode = 'stereo';
+        let pendingSeekSeconds = null;
+        function applySeek(seconds) {
+            const target = Math.max(0, Number(seconds) || 0);
+            if (video.readyState >= 1) {
+                const duration = Number.isFinite(video.duration) ? video.duration : 0;
+                video.currentTime = duration > 0 ? Math.min(target, duration) : target;
+            } else {
+                pendingSeekSeconds = target;
+            }
+        }
+
         let lyricsTrack = [];
         let lyricsIndex = -1;
-        let lyricsStatus = '';
-        let pendingSeekSeconds = null;
-        let activeSongFilename = '';
-        let lyricsNeedsAutoTiming = false;
-
-        function setLyricsPlaceholder(text) {
-            lyricsBox.hidden = false;
-            lyricCurrent.className = 'lyric-line lyric-current lyric-placeholder';
-            lyricCurrent.innerText = text;
-            lyricNext.className = 'lyric-line lyric-next';
-            lyricNext.innerText = '';
-        }
-
-        function clearLyrics() {
-            lyricsTrack = [];
-            lyricsIndex = -1;
-            lyricsStatus = '';
-            lyricsNeedsAutoTiming = false;
-            setLyricsPlaceholder('Lyrics will appear here when the song plays.');
-        }
-
-        function showLyricsMessage(message) {
-            lyricsBox.hidden = false;
-            lyricCurrent.className = 'lyric-line lyric-current lyric-placeholder';
-            lyricCurrent.innerText = message;
-            lyricNext.className = 'lyric-line lyric-next';
-            lyricNext.innerText = '';
-            lyricsIndex = -1;
-        }
-
-        function distributeLyricsAcrossDuration(lines, duration) {
-            if (!lines.length) return [];
-
-            const safeDuration = Math.max(0, Number(duration) || 0);
-            const pacingFactor = 1.7;
-            const leadInSeconds = 8;
-            const segment = lines.length > 0 ? (safeDuration * pacingFactor) / Math.max(lines.length, 1) : 0;
-            return lines.map((text, index) => ({
-                time: leadInSeconds + (segment > 0 ? index * segment : index * 4),
-                text,
-            }));
-        }
+        let lyricsBox = document.getElementById('lyrics-box');
+        let lyricCurrent = document.getElementById('lyric-current');
+        let lyricNext = document.getElementById('lyric-next');
 
         function parseLrc(text) {
             const parsed = String(text || '').split(/\r?\n/).flatMap((line) => {
@@ -99,57 +68,38 @@
                     return { time: minutes * 60 + seconds + fraction / 1000, text: lyricText };
                 });
             }).sort((a, b) => a.time - b.time);
-
-            if (parsed.length > 0) return parsed;
-
-            const plainLines = String(text || '')
-                .split(/\r?\n/)
-                .map((line) => line.trim())
-                .filter(Boolean);
-
-            lyricsNeedsAutoTiming = plainLines.length > 0;
-            return distributeLyricsAcrossDuration(plainLines, video.duration || 180);
-        }
-
-        function refreshLyricsTimingIfNeeded() {
-            if (!lyricsTrack.length || !lyricsNeedsAutoTiming) return;
-
-            const rawLines = lyricsTrack.map((line) => line.text).filter(Boolean);
-            if (!rawLines.length) return;
-
-            const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 180;
-            lyricsTrack = distributeLyricsAcrossDuration(rawLines, duration);
-            lyricsNeedsAutoTiming = false;
+            return parsed;
         }
 
         async function loadLyricsForSong(filename) {
-            clearLyrics();
-            activeSongFilename = filename;
-            const baseName = filename.replace(/\.mp4$/i, '');
+            const baseName = String(filename || '').replace(/\.mp4$/i, '');
+            lyricsTrack = [];
+            lyricsIndex = -1;
+            lyricCurrent.innerText = 'Loading lyrics...';
+            lyricNext.innerText = '';
             try {
                 const response = await fetch(`/lyrics/${encodeURIComponent(baseName)}.lrc?t=${Date.now()}`);
                 if (!response.ok) {
-                    showLyricsMessage('No lyrics found for this song.');
+                    lyricCurrent.innerText = 'No lyrics found';
+                    lyricNext.innerText = '';
                     return;
                 }
                 const text = await response.text();
                 lyricsTrack = parseLrc(text);
                 if (lyricsTrack.length > 0) {
-                    lyricsBox.hidden = false;
-                    lyricCurrent.className = 'lyric-line lyric-current';
-                    lyricNext.className = 'lyric-line lyric-next';
                     updateLyricsDisplay();
                 } else {
-                    showLyricsMessage('No lyrics found for this song.');
+                    lyricCurrent.innerText = 'No lyrics found';
+                    lyricNext.innerText = '';
                 }
             } catch (error) {
-                showLyricsMessage('Lyrics could not be loaded.');
+                lyricCurrent.innerText = 'No lyrics found';
+                lyricNext.innerText = '';
             }
         }
 
         function updateLyricsDisplay() {
             if (!lyricsTrack.length) return;
-            refreshLyricsTimingIfNeeded();
             const currentTime = video.currentTime || 0;
             let index = lyricsTrack.findIndex((line, lineIndex) => {
                 const nextTime = lyricsTrack[lineIndex + 1]?.time ?? Number.POSITIVE_INFINITY;
@@ -159,28 +109,14 @@
                 index = lyricsTrack.length - 1;
             }
             if (index === -1) {
-                lyricCurrent.className = 'lyric-line lyric-current';
-                lyricNext.className = 'lyric-line lyric-next';
                 lyricCurrent.innerText = '';
-                lyricNext.innerText = lyricsTrack[0]?.text || '';
+                lyricNext.innerText = lyricsTrack[0]?.text || 'No lyrics found';
                 return;
             }
             if (index !== lyricsIndex) {
                 lyricsIndex = index;
-                lyricCurrent.className = 'lyric-line lyric-current';
-                lyricNext.className = 'lyric-line lyric-next';
                 lyricCurrent.innerText = lyricsTrack[index].text;
                 lyricNext.innerText = lyricsTrack[index + 1]?.text || '';
-            }
-        }
-
-        function applySeek(seconds) {
-            const target = Math.max(0, Number(seconds) || 0);
-            if (video.readyState >= 1) {
-                const duration = Number.isFinite(video.duration) ? video.duration : 0;
-                video.currentTime = duration > 0 ? Math.min(target, duration) : target;
-            } else {
-                pendingSeekSeconds = target;
             }
         }
 
@@ -224,7 +160,6 @@
         socket.on('play_video', (data) => {
             waiting.style.display = 'none';
             overlay.innerText = "Now playing: " + data.title;
-            activeSongFilename = data.filename || '';
             video.src = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
             loadLyricsForSong(data.filename);
             video.play().then(() => {
@@ -242,7 +177,6 @@
                 video.src = "";
                 waiting.style.display = 'block';
                 overlay.innerText = "⏹ Stopped";
-                clearLyrics();
             }
         });
 
@@ -279,13 +213,33 @@
                 pendingSeekSeconds = null;
                 applySeek(target);
             }
-            if (activeSongFilename) {
-                refreshLyricsTimingIfNeeded();
-                updateLyricsDisplay();
-            }
         });
 
-        video.addEventListener('timeupdate', updateLyricsDisplay);
+        video.addEventListener('timeupdate', () => {
+            updateLyricsDisplay();
+            socket.emit('song_status', { filename: currentTrackFilename || '', seconds: video.currentTime || 0 });
+        });
+        video.addEventListener('seeked', () => {
+            socket.emit('song_status', { filename: currentTrackFilename || '', seconds: video.currentTime || 0 });
+        });
+
+        let currentTrackFilename = '';
+        socket.on('play_video', (data) => {
+            currentTrackFilename = data.filename || '';
+            if (currentTrackFilename) {
+                socket.emit('song_status', { filename: currentTrackFilename, seconds: 0 });
+            }
+            waiting.style.display = 'none';
+            overlay.innerText = "Now playing: " + data.title;
+            video.src = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            loadLyricsForSong(data.filename);
+            video.play().then(() => {
+                if(!isAudioSetup) setupAudio();
+                setAudioMode('original'); 
+            }).catch(e => {
+                overlay.innerText = "⚠️ Click the screen to start playback";
+            });
+        });
 
         document.body.addEventListener('click', initAudioContext);
     </script>
