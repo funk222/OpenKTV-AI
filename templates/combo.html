@@ -240,7 +240,13 @@
             margin-top: 8px;
             flex: 1 1 auto;
             min-height: 180px;
+            cursor: pointer;
+            user-select: none;
             display: flex;
+        .sidebar-lyric-line:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: #ffffff;
+        }
             flex-direction: column;
             overflow: hidden;
         }
@@ -250,6 +256,29 @@
             font-size: 13px;
             margin-bottom: 8px;
             flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .lyrics-adjust-btn {
+            border: none;
+            border-radius: 8px;
+            background: #455a64;
+            color: #f4f8fa;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            display: none;
+        }
+        .lyrics-adjust-btn.active {
+            background: #2e7d32;
+            color: #eaffea;
+        }
+        .sidebar-lyrics-list.adjusting {
+            cursor: ns-resize;
+            user-select: none;
         }
         .sidebar-lyrics-list {
             overflow-y: auto;
@@ -344,7 +373,10 @@
         </div>
 
         <div class="sidebar-lyrics-panel" id="sidebar-lyrics-panel">
-            <div class="sidebar-lyrics-head">📝 Synced Lyrics</div>
+            <div class="sidebar-lyrics-head">
+                <span>📝 Synced Lyrics</span>
+                <button id="lyrics-adjust-btn" class="lyrics-adjust-btn" onclick="toggleLyricsAdjustMode()">Adjust Lyrics Sync</button>
+            </div>
             <div class="sidebar-lyrics-list" id="sidebar-lyrics-list">
                 <div class="sidebar-lyrics-empty">No lyrics loaded.</div>
             </div>
@@ -369,6 +401,7 @@ const socket = io();
         const lyricsStatus = document.getElementById('lyrics-status');
         const lyricsCandidatesEl = document.getElementById('lyrics-candidates');
         const sidebarLyricsList = document.getElementById('sidebar-lyrics-list');
+        const lyricsAdjustBtn = document.getElementById('lyrics-adjust-btn');
         const lyricsTools = document.getElementById('lyrics-tools');
         const lyricsToolsToggleBtn = document.getElementById('lyrics-tools-toggle');
         const lyricsVisibilityBtn = document.getElementById('lyrics-visibility-btn');
@@ -390,6 +423,9 @@ const socket = io();
         let lyricsTrack = [];
         let lyricsIndex = -1;
         let lyricsNeedsAutoTiming = false;
+        let lyricsAdjustMode = false;
+        let lyricsDragActive = false;
+        let lyricsDragStartY = 0;
         let lyricsCandidates = [];
         let isDraggingSplitter = false;
         let lyricsVisible = true;
@@ -581,6 +617,8 @@ const socket = io();
             lyricsTrack = [];
             lyricsIndex = -1;
             lyricsNeedsAutoTiming = false;
+            lyricsAdjustMode = false;
+            lyricsDragActive = false;
             applyLyricsVisibility();
             lyricCurrent.className = 'lyric-line lyric-current lyric-placeholder';
             lyricCurrent.innerText = 'No lyrics found for this song.';
@@ -588,6 +626,47 @@ const socket = io();
             lyricNext.className = 'lyric-line lyric-next';
             clearNativeLyricsTrack();
             renderSidebarLyrics();
+            updateLyricsAdjustButtonState();
+        }
+
+        function updateLyricsAdjustButtonState() {
+            if (!lyricsAdjustBtn) return;
+            const canShow = Boolean(video && video.paused && video.src && lyricsTrack.length);
+            if (!canShow && lyricsAdjustMode) {
+                lyricsAdjustMode = false;
+            }
+            lyricsAdjustBtn.style.display = canShow ? 'inline-flex' : 'none';
+            lyricsAdjustBtn.classList.toggle('active', lyricsAdjustMode);
+            lyricsAdjustBtn.innerText = lyricsAdjustMode ? "Done Adjusting" : "Adjust Lyrics Sync";
+            if (sidebarLyricsList) {
+                sidebarLyricsList.classList.toggle('adjusting', lyricsAdjustMode);
+            }
+        }
+
+        function toggleLyricsAdjustMode() {
+            if (!video || !video.paused || !lyricsTrack.length) return;
+            lyricsAdjustMode = !lyricsAdjustMode;
+            lyricsDragActive = false;
+            updateLyricsAdjustButtonState();
+            if (lyricsAdjustMode) {
+                setLyricsStatus('Lyrics adjust mode ON: drag lyric list up/down to retime.');
+            } else {
+                setLyricsStatus('Lyrics adjust mode OFF.');
+            }
+        }
+
+        function shiftLyricsTrackBy(deltaSeconds) {
+            if (!lyricsTrack.length) return;
+            const delta = Number(deltaSeconds) || 0;
+            let prev = -0.01;
+            lyricsTrack = lyricsTrack.map((line) => {
+                let nextTime = Math.max(0, (Number(line.time) || 0) + delta);
+                if (nextTime <= prev) {
+                    nextTime = prev + 0.01;
+                }
+                prev = nextTime;
+                return { time: nextTime, text: line.text };
+            });
         }
 
         function renderSidebarLyrics() {
@@ -601,10 +680,85 @@ const socket = io();
                 const row = document.createElement('div');
                 row.className = 'sidebar-lyric-line';
                 row.dataset.index = String(index);
+                row.title = 'Click to align this lyric line to current playback time';
                 row.innerText = line.text || '';
+                row.addEventListener('click', () => {
+                    if (lyricsAdjustMode && video && video.paused) {
+                        alignLyricsByClickedLine(index);
+                    } else {
+                        jumpToLyricIndex(index);
+                    }
+                });
                 sidebarLyricsList.appendChild(row);
             });
             updateSidebarLyricsActive();
+        }
+
+        function jumpToLyricIndex(index) {
+            if (!lyricsTrack.length) return;
+            const parsedIndex = Number(index);
+            if (!Number.isInteger(parsedIndex) || parsedIndex < 0 || parsedIndex >= lyricsTrack.length) return;
+
+            const target = Math.max(0, Number(lyricsTrack[parsedIndex].time) || 0);
+            applySeek(target);
+            socket.emit('seek_to', { seconds: target });
+            setLyricsStatus(`Jumped to line ${parsedIndex + 1}.`);
+            pingControlBar();
+        }
+
+        function alignLyricsByClickedLine(index) {
+            if (!lyricsAdjustMode || !video || !video.paused) {
+                setLyricsStatus('Pause first, then enable Adjust Lyrics Sync to edit timeline.', true);
+                return;
+            }
+            if (!lyricsTrack.length) return;
+            const parsedIndex = Number(index);
+            if (!Number.isInteger(parsedIndex) || parsedIndex < 0 || parsedIndex >= lyricsTrack.length) return;
+
+            const now = Math.max(0, Number(video.currentTime) || 0);
+            const lineTime = Math.max(0, Number(lyricsTrack[parsedIndex].time) || 0);
+            const delta = now - lineTime;
+            if (!Number.isFinite(delta)) return;
+
+            shiftLyricsTrackBy(delta);
+            attachNativeLyricsTrack(lyricsTrack);
+            updateLyricsDisplay();
+            renderSidebarLyrics();
+            setLyricsStatus(`Aligned lyrics using line ${parsedIndex + 1}.`);
+            pingControlBar();
+        }
+
+        function startLyricsDragAdjust(event) {
+            if (!lyricsAdjustMode || !video || !video.paused || !lyricsTrack.length) return;
+            const pointY = event.touches ? event.touches[0].clientY : event.clientY;
+            if (!Number.isFinite(pointY)) return;
+            lyricsDragActive = true;
+            lyricsDragStartY = pointY;
+            event.preventDefault();
+        }
+
+        function moveLyricsDragAdjust(event) {
+            if (!lyricsDragActive || !lyricsAdjustMode || !video || !video.paused || !lyricsTrack.length) return;
+            const pointY = event.touches ? event.touches[0].clientY : event.clientY;
+            if (!Number.isFinite(pointY)) return;
+            const deltaY = pointY - lyricsDragStartY;
+            if (Math.abs(deltaY) < 2) return;
+
+            // 100px drag ~= 1 second timing shift.
+            const deltaSeconds = -(deltaY / 100);
+            lyricsDragStartY = pointY;
+            shiftLyricsTrackBy(deltaSeconds);
+            attachNativeLyricsTrack(lyricsTrack);
+            updateLyricsDisplay();
+            renderSidebarLyrics();
+            setLyricsStatus(`Adjusting lyrics timeline: ${deltaSeconds > 0 ? '+' : ''}${deltaSeconds.toFixed(2)}s`);
+            event.preventDefault();
+        }
+
+        function endLyricsDragAdjust() {
+            if (!lyricsDragActive) return;
+            lyricsDragActive = false;
+            setLyricsStatus('Lyrics timeline updated. Click "Done Adjusting" when finished.');
         }
 
         function updateSidebarLyricsActive() {
@@ -1095,6 +1249,7 @@ const socket = io();
             video.pause(); video.src = ""; video.style.display = 'none';
             idleScreen.style.display = 'block'; overlay.innerText = "⏹ Stopped (idle)";
             nextInfo.style.display = 'none';
+            updateLyricsAdjustButtonState();
         });
 
         socket.on('command', (cmd) => {
@@ -1131,6 +1286,7 @@ const socket = io();
             }
             updateLyricsDisplay();
             updateProgressUi();
+            updateLyricsAdjustButtonState();
         });
 
         video.addEventListener('timeupdate', () => {
@@ -1148,6 +1304,9 @@ const socket = io();
                 attachNativeLyricsTrack(lyricsTrack);
             }
         });
+        video.addEventListener('pause', updateLyricsAdjustButtonState);
+        video.addEventListener('play', updateLyricsAdjustButtonState);
+        video.addEventListener('ended', updateLyricsAdjustButtonState);
 
         // --- 遙控器邏輯 ---
 
@@ -1204,6 +1363,13 @@ const socket = io();
         initLayoutSplitter();
         refreshQuickTrackButtons();
         initControlBarAutoHide();
+        sidebarLyricsList.addEventListener('mousedown', startLyricsDragAdjust);
+        sidebarLyricsList.addEventListener('touchstart', startLyricsDragAdjust, { passive: false });
+        window.addEventListener('mousemove', moveLyricsDragAdjust);
+        window.addEventListener('touchmove', moveLyricsDragAdjust, { passive: false });
+        window.addEventListener('mouseup', endLyricsDragAdjust);
+        window.addEventListener('touchend', endLyricsDragAdjust);
+        window.addEventListener('touchcancel', endLyricsDragAdjust);
         document.addEventListener('fullscreenchange', syncFullscreenButtonState);
         document.addEventListener('webkitfullscreenchange', syncFullscreenButtonState);
         video.addEventListener('webkitbeginfullscreen', syncFullscreenButtonState);
@@ -1214,6 +1380,7 @@ const socket = io();
             }
         });
         syncFullscreenButtonState();
+        updateLyricsAdjustButtonState();
         videoShell.addEventListener('click', togglePauseByScreenTap);
         updateProgressUi();
         ensureAudioEngine();

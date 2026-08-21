@@ -138,6 +138,12 @@
             font-size: 14px;
             line-height: 1.3;
             transition: all 0.2s ease;
+            cursor: pointer;
+            user-select: none;
+        }
+        .remote-lyric-line:hover {
+            background: rgba(255,255,255,0.08);
+            color: #ffffff;
         }
         .remote-lyric-line.current {
             background: rgba(8, 168, 138, 0.2);
@@ -332,6 +338,25 @@
             gap: 10px;
             align-items: center;
         }
+        .song-picker-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .song-picker-queued {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 5px 9px;
+            font-size: 11px;
+            font-weight: 800;
+            color: #08211b;
+            background: #7ee7ca;
+            border: 1px solid #49cfae;
+        }
+        .song-picker-item.queued {
+            border-color: rgba(126, 231, 202, 0.65);
+            box-shadow: inset 0 0 0 1px rgba(126, 231, 202, 0.22);
+        }
         .song-picker-delete {
             border: none;
             border-radius: 8px;
@@ -479,9 +504,12 @@
         let queueState = [];
         let metadataMap = {};
         let songPickerSongs = [];
+        let songPickerGroupKey = 'artist';
+        let songPickerGroupName = '';
         let remoteLyricsTrack = [];
         let remoteLyricsIndex = -1;
         let remoteCurrentPlaybackFile = '';
+        let remoteCurrentPlaybackSeconds = 0;
 
         function parseSongMeta(filename) {
             const raw = String(filename || '').replace(/\.mp4$/i, '');
@@ -614,8 +642,44 @@
                 const classes = ['remote-lyric-line'];
                 if (index === remoteLyricsIndex) classes.push('current');
                 else if (remoteLyricsIndex >= 0 && index < remoteLyricsIndex) classes.push('passed');
-                return `<div class="${classes.join(' ')}">${escapeHtml(line.text || '')}</div>`;
+                return `<div class="${classes.join(' ')}" data-lyric-index="${index}" title="Tap to align this lyric to current playback">${escapeHtml(line.text || '')}</div>`;
             }).join('');
+
+            panel.querySelectorAll('[data-lyric-index]').forEach((node) => {
+                node.addEventListener('click', () => {
+                    const idx = Number(node.getAttribute('data-lyric-index'));
+                    syncToRemoteLyricIndex(idx);
+                });
+            });
+
+            if (remoteLyricsIndex >= 0) {
+                const current = panel.querySelector(`[data-lyric-index="${remoteLyricsIndex}"]`);
+                if (current) {
+                    current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                }
+            }
+        }
+
+        function syncToRemoteLyricIndex(index) {
+            if (!remoteLyricsTrack.length) return;
+            const parsedIndex = Number(index);
+            if (!Number.isInteger(parsedIndex) || parsedIndex < 0 || parsedIndex >= remoteLyricsTrack.length) return;
+
+            const now = Math.max(0, Number(remoteCurrentPlaybackSeconds) || 0);
+            const lineTime = Math.max(0, Number(remoteLyricsTrack[parsedIndex].time) || 0);
+            const delta = now - lineTime;
+            if (!Number.isFinite(delta)) return;
+
+            let prev = -0.01;
+            remoteLyricsTrack = remoteLyricsTrack.map((line) => {
+                let nextTime = Math.max(0, (Number(line.time) || 0) + delta);
+                if (nextTime <= prev) nextTime = prev + 0.01;
+                prev = nextTime;
+                return { time: nextTime, text: line.text };
+            });
+
+            remoteLyricsIndex = parsedIndex;
+            renderRemoteLyrics();
         }
 
         function updateRemoteLyricsByTime(seconds) {
@@ -677,16 +741,21 @@
         socket.on('update_queue', (playlist) => {
             queueState = Array.isArray(playlist) ? playlist : [];
             renderQueue();
+            const picker = document.getElementById('song-picker');
+            if (picker && picker.classList.contains('open')) {
+                renderSongPickerList();
+            }
         });
 
         socket.on('song_status', (data) => {
             const file = String((data || {}).filename || '');
             if (!file) return;
+            remoteCurrentPlaybackSeconds = Math.max(0, Number((data || {}).seconds) || 0);
             if (file !== remoteCurrentPlaybackFile) {
                 remoteCurrentPlaybackFile = file;
                 loadRemoteLyrics(file);
             }
-            updateRemoteLyricsByTime((data || {}).seconds || 0);
+            updateRemoteLyricsByTime(remoteCurrentPlaybackSeconds);
         });
 
         socket.on('play_video', (data) => {
@@ -771,39 +840,64 @@
 
         function openSongPicker(groupKey, groupName, songs) {
             songPickerSongs = Array.isArray(songs) ? songs.slice() : [];
+            songPickerGroupKey = groupKey;
+            songPickerGroupName = groupName;
             const titleEl = document.getElementById('song-picker-title');
-            const listEl = document.getElementById('song-picker-list');
             const picker = document.getElementById('song-picker');
             titleEl.innerText = `${groupKey.toUpperCase()}: ${groupName}`;
+            renderSongPickerList();
+            picker.classList.add('open');
+        }
+
+        function renderSongPickerList() {
+            const listEl = document.getElementById('song-picker-list');
+            if (!listEl) return;
             listEl.innerHTML = '';
+
             songPickerSongs.forEach((song) => {
                 const meta = getMetadataOnlyRecord(song);
                 const titleOnly = cleanDisplaySongTitle(meta.title);
                 const albumOnly = cleanDisplayAlbum(meta.album);
+                const isQueued = queueState.includes(song);
                 const li = document.createElement('li');
-                li.className = 'song-picker-item';
+                li.className = `song-picker-item${isQueued ? ' queued' : ''}`;
                 li.innerHTML = `
                     <div class="song-picker-row">
                         <div>
                             <div class="song-title">${escapeHtml(titleOnly)}</div>
-                            ${groupKey === 'album' ? '' : `<div class="song-picker-sub">${escapeHtml(albumOnly)}</div>`}
+                            ${songPickerGroupKey === 'album' ? '' : `<div class="song-picker-sub">${escapeHtml(albumOnly)}</div>`}
                         </div>
-                        <button class="song-picker-delete">Delete</button>
+                        <div class="song-picker-actions">
+                            ${isQueued ? '<span class="song-picker-queued">Queued</span>' : ''}
+                            <button class="song-picker-delete">Delete</button>
+                        </div>
                     </div>
                 `;
                 li.addEventListener('click', () => {
                     selectSong(song);
                     addToQueue(song);
-                    closeSongPicker();
+                    li.classList.add('queued');
+                    if (!li.querySelector('.song-picker-queued')) {
+                        const actions = li.querySelector('.song-picker-actions');
+                        if (actions) {
+                            const badge = document.createElement('span');
+                            badge.className = 'song-picker-queued';
+                            badge.innerText = 'Queued';
+                            actions.insertBefore(badge, actions.firstChild);
+                        }
+                    }
                 });
                 const delBtn = li.querySelector('.song-picker-delete');
                 delBtn.addEventListener('click', async (event) => {
                     event.stopPropagation();
-                    await deleteSongFromOrdering(song, titleOnly, true);
+                    const deleted = await deleteSongFromOrdering(song, titleOnly, false);
+                    if (deleted) {
+                        songPickerSongs = songPickerSongs.filter((item) => item !== song);
+                        renderSongPickerList();
+                    }
                 });
                 listEl.appendChild(li);
             });
-            picker.classList.add('open');
         }
 
         function closeSongPicker() {

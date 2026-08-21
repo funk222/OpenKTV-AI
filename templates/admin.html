@@ -81,17 +81,14 @@
         .batch-row { display: grid; grid-template-columns: 1.4fr 1fr auto; gap: 8px; align-items: center; }
         .batch-row input { margin: 0; }
         .row-remove { width: auto; margin: 0; padding: 10px 12px; background: #d32f2f; }
-        .batch-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        @media (max-width: 820px) {
+            .batch-row { grid-template-columns: 1fr; }
+            .batch-actions { grid-template-columns: 1fr; }
+            .row-remove { width: 100%; }
+        }
         .batch-help { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
         
-        /* 導航列樣式 */
-        .nav-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        .nav-btn { flex: 1; text-align: center; padding: 12px 10px; text-decoration: none; border-radius: 8px; font-weight: 700; color: white; font-size: 14px; min-width: 100px; border: 1px solid rgba(255,255,255,0.14); transition: 0.2s;}
-        .nav-btn:active { transform: scale(0.95); }
-        .nav-remote { background: #3f5763; }
-        .nav-combo { background: #455a64; }
-        .nav-player { background: #4e6f80; }
-
         .qr-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -122,6 +119,19 @@
             font-size: 12px;
             word-break: break-all;
         }
+        .qr-open {
+            display: block;
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 700;
+            color: #f2f2f2;
+            background: #455a64;
+            border: 1px solid rgba(255,255,255,0.14);
+            transition: 0.2s;
+        }
+        .qr-open:active { transform: scale(0.97); }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 </head>
@@ -137,41 +147,31 @@
                 <h4>Remote</h4>
                 <img id="qr-remote" alt="Remote QR code">
                 <div class="qr-link" id="link-remote"></div>
+                <a id="open-remote" class="qr-open" href="/remote">Open Remote</a>
             </div>
             <div class="qr-item">
                 <h4>Combo</h4>
                 <img id="qr-combo" alt="Combo QR code">
                 <div class="qr-link" id="link-combo"></div>
+                <a id="open-combo" class="qr-open" href="/combo">Open Combo</a>
             </div>
             <div class="qr-item">
                 <h4>Player</h4>
                 <img id="qr-player" alt="Player QR code">
                 <div class="qr-link" id="link-player"></div>
+                <a id="open-player" class="qr-open" href="/player">Open Player</a>
             </div>
         </div>
     </div>
-    
-    <div class="nav-bar">
-        <a href="/remote" class="nav-btn nav-remote">📱 Remote</a>
-        <a href="/combo" class="nav-btn nav-combo">🖥️ Combo</a>
-        <a href="/player" class="nav-btn nav-player">📺 Player</a>
-    </div>
 
     <div class="card">
-        <h3>📥 Add a KTV Song</h3>
-        <label>1. YouTube URL:</label>
-        <input type="text" id="yt_url" placeholder="https://www.youtube.com/watch?v=...">
-        <label>2. Song title (optional override):</label>
-        <input type="text" id="yt_title" placeholder="Auto-detected from YouTube metadata; optional override: Artist - Album - Song Title">
-        <button id="btn_dl" class="btn-dl" onclick="startDownload()">Start Processing (L: vocal / R: instrumental)</button>
-
-        <hr style="border: 0; border-top: 1px solid #ddd; margin: 18px 0;">
-        <label>4. Bulk add songs (easy mode):</label>
-        <div class="batch-help">Fill one row per song, then click Start Batch Processing.</div>
+        <h3>📥 Add KTV Songs</h3>
+        <label>Unified input (single + batch):</label>
+        <div class="batch-help">Fill one row per song. The Start button automatically handles single or batch rows.</div>
         <div id="batch_rows" class="batch-list"></div>
         <div class="batch-actions">
             <button id="btn_add_row" class="btn-secondary" onclick="addBatchRow()">+ Add Row</button>
-            <button id="btn_batch" class="btn-dl" onclick="startBatchDownload()">Start Batch Processing</button>
+            <button id="btn_batch" class="btn-dl" onclick="startSmartDownload()">Start Processing</button>
         </div>
     </div>
 
@@ -188,7 +188,6 @@
     <script>
         const socket = io();
         const logArea = document.getElementById('log');
-        const btnDl = document.getElementById('btn_dl');
         const btnBatch = document.getElementById('btn_batch');
         const btnAddRow = document.getElementById('btn_add_row');
         const btnUpdate = document.getElementById('btn_update');
@@ -197,8 +196,8 @@
 
         function setBusyUi(isBusy, labelText) {
             btnUpdate.disabled = isBusy;
-            btnDl.innerText = isBusy ? (labelText || "Processing... (you can keep adding)") : "Start Processing (L: vocal / R: instrumental)";
-            btnBatch.innerText = isBusy ? `Queue Batch (${queuedCount} waiting)` : "Start Batch Processing";
+            btnAddRow.disabled = isBusy;
+            btnBatch.innerText = isBusy ? `Queue Processing (${queuedCount} waiting)` : "Start Processing";
         }
 
         function createBatchRow(url = '', title = '') {
@@ -265,9 +264,7 @@
             else setBusyUi(true, `Processing... (${queuedCount} waiting)`);
         });
 
-        function startDownload() {
-            const url = document.getElementById('yt_url').value.trim();
-            const title = document.getElementById('yt_title').value.trim();
+        function enqueueDownload(url, title) {
             if(!url) {
                 alert("YouTube URL is required.");
                 return;
@@ -275,11 +272,9 @@
             socket.emit('start_download', {url: url, title: title});
             logArea.value += `📥 Added to queue: ${title || 'auto-detected metadata'}\n`;
             logArea.scrollTop = logArea.scrollHeight;
-            document.getElementById('yt_url').value = '';
-            document.getElementById('yt_title').value = '';
         }
 
-        function startBatchDownload() {
+        function startSmartDownload() {
             const parsed = collectBatchJobs();
             if (!parsed.jobs.length) {
                 alert("Add at least one valid row with a YouTube URL.");
@@ -291,10 +286,8 @@
             }
 
             parsed.jobs.forEach((job) => {
-                socket.emit('start_download', job);
-                logArea.value += `📥 Added to queue: ${job.title || 'auto-detected metadata'}\n`;
+                enqueueDownload(job.url, job.title);
             });
-            logArea.scrollTop = logArea.scrollHeight;
             resetBatchRows();
         }
 
@@ -314,9 +307,9 @@
             const base = `http://${host}:${port}`;
 
             const targets = [
-                { path: '/remote', img: 'qr-remote', link: 'link-remote' },
-                { path: '/combo', img: 'qr-combo', link: 'link-combo' },
-                { path: '/player', img: 'qr-player', link: 'link-player' },
+                { path: '/remote', img: 'qr-remote', link: 'link-remote', open: 'open-remote' },
+                { path: '/combo', img: 'qr-combo', link: 'link-combo', open: 'open-combo' },
+                { path: '/player', img: 'qr-player', link: 'link-player', open: 'open-player' },
             ];
 
             targets.forEach((t) => {
@@ -324,6 +317,7 @@
                 const qr = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(url)}`;
                 document.getElementById(t.img).src = qr;
                 document.getElementById(t.link).innerText = url;
+                document.getElementById(t.open).href = url;
             });
         }
 
