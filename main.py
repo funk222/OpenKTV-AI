@@ -396,7 +396,7 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 PORT = 5000
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 def broadcast_log(msg):
     # 用 print 就會自動被我們的 GUIWriter 抓走並顯示在介面上

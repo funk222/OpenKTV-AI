@@ -566,3 +566,9 @@ If you want, the next step can be to convert this documentation into one of thes
 1. customer-facing product overview
 2. developer architecture document
 3. formal GitHub-ready release README
+
+---
+
+## 11. Release Notes
+
+Detailed version history is maintained in [CHANGELOG.md](CHANGELOG.md).
