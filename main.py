@@ -37,7 +37,7 @@ if getattr(sys, 'frozen', False):
 # 正常 Import 區
 # ==========================================
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 # ... 下面的 import 保留原樣 ...
 import subprocess
 import shutil
@@ -64,6 +64,57 @@ else:
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 FFMPEG_DIR = os.path.join(BASE_DIR, "ffmpeg", "bin")
 YT_DLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
+APP_CONFIG_PATH = os.path.join(BASE_DIR, "_app_config.json")
+LOCAL_STATE_DIR = os.path.join(BASE_DIR, "_state")
+VALID_DEMUCS_MODELS = {"htdemucs", "mdx_q", "auto"}
+DEFAULT_DEMUCS_MODEL = "htdemucs"
+
+
+def normalize_library_path(path_value):
+    text = str(path_value or "").strip()
+    if not text:
+        return ""
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(BASE_DIR, expanded)
+    return os.path.abspath(expanded)
+
+
+def load_app_config():
+    if not os.path.exists(APP_CONFIG_PATH):
+        return {}
+    try:
+        with open(APP_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_app_config(data):
+    payload = data if isinstance(data, dict) else {}
+    with open(APP_CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+def normalize_demucs_model(value, default=DEFAULT_DEMUCS_MODEL):
+    text = str(value or "").strip().lower()
+    return text if text in VALID_DEMUCS_MODELS else default
+
+
+def get_demucs_model_setting():
+    cfg = load_app_config()
+    return normalize_demucs_model(cfg.get("demucs_model"), DEFAULT_DEMUCS_MODEL)
+
+
+def set_demucs_model_setting(model_name):
+    normalized = normalize_demucs_model(model_name, "")
+    if normalized not in VALID_DEMUCS_MODELS:
+        raise ValueError("Invalid Demucs model option")
+    cfg = load_app_config()
+    cfg["demucs_model"] = normalized
+    save_app_config(cfg)
+    return normalized
 
 def get_runtime_python_executable():
     candidates = [
@@ -134,12 +185,161 @@ if os.path.exists(FFMPEG_DIR) and FFMPEG_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] += os.pathsep + FFMPEG_DIR
 os.environ["PATH"] += os.pathsep + BASE_DIR
 
-SONGS_DIR = os.path.join(BASE_DIR, "ktv_songs")
+if not os.path.exists(LOCAL_STATE_DIR):
+    os.makedirs(LOCAL_STATE_DIR, exist_ok=True)
+
+
+_boot_cfg = load_app_config()
+_configured_library = normalize_library_path(_boot_cfg.get("songs_dir", ""))
+SONGS_DIR = _configured_library or os.path.join(BASE_DIR, "ktv_songs")
 TEMP_BASE_DIR = os.path.join(BASE_DIR, "temp_processing") 
 SONG_METADATA_PATH = os.path.join(SONGS_DIR, "_song_metadata.json")
+SONG_METADATA_BACKUP_PATH = os.path.join(LOCAL_STATE_DIR, "_song_metadata_backup.json")
+LAST_KNOWN_SONGS = []
 
-if not os.path.exists(SONGS_DIR): os.makedirs(SONGS_DIR)
+try:
+    if not os.path.exists(SONGS_DIR):
+        os.makedirs(SONGS_DIR)
+except Exception:
+    # Network library can be temporarily offline during boot; keep running with local cache.
+    pass
 if not os.path.exists(TEMP_BASE_DIR): os.makedirs(TEMP_BASE_DIR)
+
+
+def set_songs_dir(new_dir, persist=True, allow_unavailable=True):
+    global SONGS_DIR, SONG_METADATA_PATH
+    normalized = normalize_library_path(new_dir)
+    if not normalized:
+        raise ValueError("Library path is required")
+    available = True
+    warning = ""
+    try:
+        os.makedirs(normalized, exist_ok=True)
+    except Exception as exc:
+        if not allow_unavailable:
+            raise
+        available = False
+        warning = str(exc)
+
+    SONGS_DIR = normalized
+    SONG_METADATA_PATH = os.path.join(SONGS_DIR, "_song_metadata.json")
+    if persist:
+        cfg = load_app_config()
+        cfg["songs_dir"] = SONGS_DIR
+        save_app_config(cfg)
+    return {
+        "path": SONGS_DIR,
+        "available": available,
+        "warning": warning,
+    }
+
+
+def migrate_song_library(new_dir, move_existing=True, allow_unavailable=True):
+    current = os.path.abspath(SONGS_DIR)
+    target = normalize_library_path(new_dir)
+    if not target:
+        raise ValueError("Library path is required")
+    target = os.path.abspath(target)
+
+    target_available = True
+    target_warning = ""
+    try:
+        os.makedirs(target, exist_ok=True)
+    except Exception as exc:
+        if not allow_unavailable:
+            raise
+        target_available = False
+        target_warning = str(exc)
+
+    moved = 0
+    skipped = 0
+    failures = []
+
+    if move_existing and current != target and os.path.exists(current) and target_available:
+        for name in os.listdir(current):
+            src = os.path.join(current, name)
+            dst = os.path.join(target, name)
+            if os.path.exists(dst):
+                skipped += 1
+                failures.append(f"Skip existing: {name}")
+                continue
+            try:
+                shutil.move(src, dst)
+                moved += 1
+            except Exception as exc:
+                skipped += 1
+                failures.append(f"{name}: {exc}")
+
+    if move_existing and current != target and not target_available:
+        failures.append("Target currently unavailable; skipped moving existing files.")
+
+    set_result = set_songs_dir(target, persist=True, allow_unavailable=allow_unavailable)
+
+    return {
+        "old_path": current,
+        "new_path": target,
+        "moved": moved,
+        "skipped": skipped,
+        "move_existing": bool(move_existing),
+        "failures": failures[:20],
+        "available": bool(set_result.get("available", False)),
+        "warning": str(set_result.get("warning") or target_warning or ""),
+    }
+
+
+def get_library_availability(path=None):
+    candidate = os.path.abspath(path or SONGS_DIR)
+    try:
+        if not os.path.isdir(candidate):
+            return False, "Library path is not accessible"
+        with os.scandir(candidate) as iterator:
+            for _ in iterator:
+                break
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _load_backup_blob():
+    if not os.path.exists(SONG_METADATA_BACKUP_PATH):
+        return {"libraries": {}}
+    try:
+        with open(SONG_METADATA_BACKUP_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if isinstance(payload, dict) and isinstance(payload.get("libraries"), dict):
+            return payload
+    except Exception:
+        pass
+    return {"libraries": {}}
+
+
+def _save_backup_blob(blob):
+    safe = blob if isinstance(blob, dict) else {"libraries": {}}
+    if "libraries" not in safe or not isinstance(safe.get("libraries"), dict):
+        safe = {"libraries": {}}
+    with open(SONG_METADATA_BACKUP_PATH, "w", encoding="utf-8") as fh:
+        json.dump(safe, fh, ensure_ascii=False, indent=2)
+
+
+def load_song_metadata_backup():
+    blob = _load_backup_blob()
+    libraries = blob.get("libraries") if isinstance(blob, dict) else {}
+    if not isinstance(libraries, dict):
+        return {}
+    key = os.path.abspath(SONGS_DIR)
+    entry = libraries.get(key, {})
+    return entry if isinstance(entry, dict) else {}
+
+
+def save_song_metadata_backup(store):
+    blob = _load_backup_blob()
+    key = os.path.abspath(SONGS_DIR)
+    libraries = blob.get("libraries") if isinstance(blob, dict) else {}
+    if not isinstance(libraries, dict):
+        libraries = {}
+    libraries[key] = store if isinstance(store, dict) else {}
+    blob["libraries"] = libraries
+    _save_backup_blob(blob)
 
 # ==========================================
 # Flask + SocketIO 伺服器
@@ -147,6 +347,42 @@ if not os.path.exists(TEMP_BASE_DIR): os.makedirs(TEMP_BASE_DIR)
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.config['SECRET_KEY'] = 'ktv_secret'
 socketio = SocketIO(app, cors_allowed_origins="*")
+EXT_REQUEST_TTL_SECONDS = 300
+extension_request_cache = {}
+extension_request_lock = threading.Lock()
+
+
+def _prune_extension_request_cache(now_ts=None):
+    now_ts = now_ts if now_ts is not None else time.time()
+    stale_keys = [
+        key for key, row in extension_request_cache.items()
+        if now_ts - float(row.get('ts', 0.0)) > EXT_REQUEST_TTL_SECONDS
+    ]
+    for key in stale_keys:
+        extension_request_cache.pop(key, None)
+
+
+def get_extension_request_result(request_id):
+    if not request_id:
+        return None
+    with extension_request_lock:
+        _prune_extension_request_cache()
+        row = extension_request_cache.get(request_id)
+        if not row:
+            return None
+        payload = row.get('payload', {})
+        return payload if isinstance(payload, dict) else None
+
+
+def save_extension_request_result(request_id, payload):
+    if not request_id:
+        return
+    with extension_request_lock:
+        _prune_extension_request_cache()
+        extension_request_cache[request_id] = {
+            'ts': time.time(),
+            'payload': payload if isinstance(payload, dict) else {},
+        }
 
 def get_local_ip():
     try:
@@ -160,7 +396,7 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 PORT = 5000
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 def broadcast_log(msg):
     # 用 print 就會自動被我們的 GUIWriter 抓走並顯示在介面上
@@ -169,7 +405,7 @@ def broadcast_log(msg):
 
 
 def broadcast_song_list():
-    songs = sorted([f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')])
+    songs = list_song_files()
     socketio.emit('refresh_list')
     socketio.emit('update_list', songs)
     return songs
@@ -209,25 +445,107 @@ def delete_song_file(filename):
     return True, removed_current, filename
 
 
-def list_song_files():
-    return sorted([f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')])
+def list_song_files(strict=False):
+    global LAST_KNOWN_SONGS
+    available, reason = get_library_availability()
+    if not available:
+        if strict:
+            raise RuntimeError(f"Library unavailable: {reason}")
+        if LAST_KNOWN_SONGS:
+            return list(LAST_KNOWN_SONGS)
+        backup = load_song_metadata_backup()
+        return sorted([name for name in backup.keys() if str(name).lower().endswith('.mp4')])
+
+    songs = sorted([f.name for f in os.scandir(SONGS_DIR) if f.is_file() and f.name.lower().endswith('.mp4')])
+    LAST_KNOWN_SONGS = list(songs)
+    return songs
+
+
+def rescan_library_files(sync_metadata=True):
+    available, reason = get_library_availability()
+    if not available:
+        return {
+            "songs": len(list_song_files(strict=False)),
+            "metadata_added": 0,
+            "metadata_removed": 0,
+            "queue_removed": 0,
+            "removed_current": False,
+            "library_available": False,
+            "library_reason": reason,
+            "dry_run_only": True,
+        }
+
+    songs = list_song_files(strict=True)
+    song_set = set(songs)
+
+    store = load_song_metadata_store()
+    added = 0
+    removed = 0
+
+    if sync_metadata:
+        for filename in songs:
+            if filename not in store:
+                entry = normalize_song_metadata_entry(filename, {})
+                entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                store[filename] = entry
+                added += 1
+
+        stale_keys = [k for k in store.keys() if k not in song_set]
+        for key in stale_keys:
+            store.pop(key, None)
+            removed += 1
+
+        if added or removed:
+            save_song_metadata_store(store)
+
+    queue_before = list(playlist_queue)
+    playlist_queue[:] = [name for name in playlist_queue if name in song_set]
+    queue_removed = len(queue_before) - len(playlist_queue)
+    removed_current = bool(queue_before and queue_before[0] not in song_set)
+
+    if removed_current:
+        if len(playlist_queue) > 0:
+            socketio.emit('play_video', {'filename': playlist_queue[0], 'title': playlist_queue[0]})
+        else:
+            socketio.emit('stop_video')
+
+    socketio.emit('update_queue', playlist_queue)
+    broadcast_song_list()
+
+    return {
+        "songs": len(songs),
+        "metadata_added": added,
+        "metadata_removed": removed,
+        "queue_removed": queue_removed,
+        "removed_current": removed_current,
+        "library_available": True,
+        "library_reason": "",
+        "dry_run_only": False,
+    }
 
 
 def load_song_metadata_store():
     if not os.path.exists(SONG_METADATA_PATH):
-        return {}
+        return load_song_metadata_backup()
     try:
         with open(SONG_METADATA_PATH, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
-        return payload if isinstance(payload, dict) else {}
+        store = payload if isinstance(payload, dict) else {}
+        save_song_metadata_backup(store)
+        return store
     except Exception:
-        return {}
+        return load_song_metadata_backup()
 
 
 def save_song_metadata_store(data):
     safe = data if isinstance(data, dict) else {}
-    with open(SONG_METADATA_PATH, "w", encoding="utf-8") as fh:
-        json.dump(safe, fh, ensure_ascii=False, indent=2)
+    save_song_metadata_backup(safe)
+    try:
+        with open(SONG_METADATA_PATH, "w", encoding="utf-8") as fh:
+            json.dump(safe, fh, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
 
 def infer_genre_from_text(title="", artist="", album=""):
@@ -316,6 +634,70 @@ def persist_song_metadata_terms(filename, title="", artist="", album=""):
     store[safe_name] = entry
     save_song_metadata_store(store)
     return entry
+
+
+def update_song_metadata_entry(filename, title=None, artist=None, album=None):
+    safe_name = os.path.basename(str(filename or "")).strip()
+    if not safe_name:
+        raise ValueError("Invalid filename")
+
+    store = load_song_metadata_store()
+    entry = normalize_song_metadata_entry(safe_name, store.get(safe_name, {}))
+
+    if title is not None:
+        entry["title"] = str(title).strip()
+    if artist is not None:
+        entry["artist"] = str(artist).strip()
+    if album is not None:
+        entry["album"] = str(album).strip()
+
+    if not str(entry.get("genre") or "").strip():
+        entry["genre"] = infer_genre_from_text(entry.get("title", ""), entry.get("artist", ""), entry.get("album", ""))
+
+    entry["completed"] = is_metadata_completed(entry)
+    entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    store[safe_name] = entry
+    save_song_metadata_store(store)
+    return entry
+
+
+def rename_artist_metadata_batch(source_artist, target_artist):
+    source = str(source_artist or "").strip()
+    target = str(target_artist or "").strip()
+    if not source:
+        raise ValueError("Source artist is required")
+    if not target:
+        raise ValueError("Target artist is required")
+
+    store = load_song_metadata_store()
+    songs = list_song_files(strict=False)
+    updated_files = []
+    source_key = source.casefold()
+
+    for filename in songs:
+        entry = normalize_song_metadata_entry(filename, store.get(filename, {}))
+        current_artist = str(entry.get("artist") or "").strip()
+        if current_artist.casefold() != source_key:
+            continue
+
+        entry["artist"] = target
+        if not str(entry.get("genre") or "").strip():
+            entry["genre"] = infer_genre_from_text(entry.get("title", ""), entry.get("artist", ""), entry.get("album", ""))
+        entry["completed"] = is_metadata_completed(entry)
+        entry["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        store[filename] = entry
+        updated_files.append(filename)
+
+    if updated_files:
+        save_song_metadata_store(store)
+
+    return {
+        "source_artist": source,
+        "target_artist": target,
+        "updated": len(updated_files),
+        "songs": updated_files,
+    }
 
 
 def _artwork_to_large(url):
@@ -588,7 +970,7 @@ def api_delete_lyrics(filename):
 
 @app.route('/api/list')
 def get_song_list():
-    songs = [f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')]
+    songs = list_song_files(strict=False)
     return json.dumps(songs) 
 
 
@@ -598,6 +980,61 @@ def api_song_metadata():
     return json.dumps({"ok": True, "metadata": snapshot})
 
 
+@app.route('/api/metadata/<path:filename>', methods=['POST'])
+def api_song_metadata_update(filename):
+    try:
+        safe_name = os.path.basename(str(filename or "").strip())
+        if safe_name == 'artist-batch':
+            return api_song_metadata_artist_batch()
+        if not safe_name.lower().endswith('.mp4'):
+            return json.dumps({"ok": False, "error": "Only .mp4 songs can be edited"}), 400
+
+        payload = request.get_json(silent=True) or {}
+        if 'title' not in payload and 'artist' not in payload and 'album' not in payload:
+            return json.dumps({"ok": False, "error": "No editable fields supplied"}), 400
+
+        title = payload.get('title', None)
+        artist = payload.get('artist', None)
+        album = payload.get('album', None)
+
+        if title is not None and not str(title).strip():
+            return json.dumps({"ok": False, "error": "Song title cannot be empty"}), 400
+
+        updated = update_song_metadata_entry(safe_name, title=title, artist=artist, album=album)
+        broadcast_log(f"✍️ Metadata updated: {safe_name} -> {updated.get('title', '')} / {updated.get('artist', '')}")
+        socketio.emit('refresh_list')
+        return json.dumps({"ok": True, "filename": safe_name, "metadata": updated})
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/metadata/artist-batch', methods=['POST'])
+def api_song_metadata_artist_batch():
+    try:
+        payload = request.get_json(silent=True) or {}
+        source_artist = str(payload.get('source_artist') or '').strip()
+        target_artist = str(payload.get('target_artist') or '').strip()
+        if not source_artist:
+            return json.dumps({"ok": False, "error": "source_artist is required"}), 400
+        if not target_artist:
+            return json.dumps({"ok": False, "error": "target_artist is required"}), 400
+
+        result = rename_artist_metadata_batch(source_artist, target_artist)
+        if result.get("updated", 0) > 0:
+            broadcast_log(
+                f"✍️ Artist renamed: {result.get('source_artist', '')} -> "
+                f"{result.get('target_artist', '')} ({result.get('updated', 0)} songs)"
+            )
+            socketio.emit('refresh_list')
+        return json.dumps({"ok": True, **result})
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
 @app.route('/api/metadata/autofill', methods=['POST'])
 def api_metadata_autofill():
     try:
@@ -605,6 +1042,188 @@ def api_metadata_autofill():
         return json.dumps({"ok": True, **result})
     except Exception as exc:
         return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/library/path')
+def api_library_path_get():
+    try:
+        available, reason = get_library_availability()
+        songs = list_song_files(strict=False)
+        return json.dumps({
+            "ok": True,
+            "path": SONGS_DIR,
+            "song_count": len(songs),
+            "available": available,
+            "warning": reason if not available else "",
+        })
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/library/pick-path', methods=['POST'])
+def api_library_pick_path():
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        selected = filedialog.askdirectory(initialdir=SONGS_DIR or BASE_DIR, title='Select Song Library Folder')
+        if not selected:
+            return json.dumps({"ok": False, "cancelled": True})
+        return json.dumps({"ok": True, "path": normalize_library_path(selected)})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": f"Folder picker unavailable: {exc}"}), 500
+    finally:
+        try:
+            if root is not None:
+                root.destroy()
+        except Exception:
+            pass
+
+
+@app.route('/api/library/path', methods=['POST'])
+def api_library_path_set():
+    try:
+        payload = request.get_json(silent=True) or {}
+        new_path = str(payload.get('path') or '').strip()
+        move_existing = bool(payload.get('move_existing', True))
+        allow_unavailable = bool(payload.get('allow_unavailable', True))
+        if not new_path:
+            return json.dumps({"ok": False, "error": "Path is required"}), 400
+
+        result = migrate_song_library(new_path, move_existing=move_existing, allow_unavailable=allow_unavailable)
+        broadcast_log(f"📁 Song library path updated: {result['new_path']} (moved: {result['moved']}, skipped: {result['skipped']})")
+        broadcast_song_list()
+        return json.dumps({"ok": True, **result})
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/library/rescan', methods=['POST'])
+def api_library_rescan():
+    try:
+        payload = request.get_json(silent=True) or {}
+        sync_metadata = bool(payload.get('sync_metadata', True))
+        result = rescan_library_files(sync_metadata=sync_metadata)
+        if not result.get('library_available', True):
+            broadcast_log(
+                f"⚠️ Library unavailable, skipped destructive sync: {result.get('library_reason', 'unknown reason')}"
+            )
+            return json.dumps({"ok": True, **result})
+
+        broadcast_log(
+            f"🔄 Library rescan finished: songs={result['songs']}, "
+            f"metadata+={result['metadata_added']}, metadata-={result['metadata_removed']}, "
+            f"queue_removed={result['queue_removed']}"
+        )
+        return json.dumps({"ok": True, **result})
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/settings/demucs')
+def api_demucs_settings_get():
+    try:
+        configured_model = get_demucs_model_setting()
+        env_override = str(os.environ.get("KTV_DEMUCS_MODEL", "")).strip().lower()
+        effective_model = env_override if env_override in {"htdemucs", "mdx_q"} else configured_model
+        return json.dumps({
+            "ok": True,
+            "model": configured_model,
+            "effective_model": effective_model,
+            "env_override": bool(env_override),
+        })
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/settings/demucs', methods=['POST'])
+def api_demucs_settings_set():
+    try:
+        payload = request.get_json(silent=True) or {}
+        model_name = str(payload.get('model') or '').strip().lower()
+        if model_name not in VALID_DEMUCS_MODELS:
+            return json.dumps({"ok": False, "error": "Invalid model option"}), 400
+        saved = set_demucs_model_setting(model_name)
+        broadcast_log(f"⚙️ Demucs model preference updated: {saved}")
+        return json.dumps({"ok": True, "model": saved})
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}), 500
+
+
+@app.route('/api/extension/add-song', methods=['POST', 'OPTIONS'])
+def api_extension_add_song():
+    if request.method == 'OPTIONS':
+        resp = app.response_class(response='')
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        resp.headers['Access-Control-Allow-Private-Network'] = 'true'
+        return resp
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        url = str(payload.get('url') or '').strip()
+        title = str(payload.get('title') or '').strip()
+        request_id = str(payload.get('request_id') or '').strip()
+
+        previous = get_extension_request_result(request_id)
+        if previous is not None:
+            resp = app.response_class(
+                response=json.dumps({**previous, 'duplicate': True}),
+                mimetype='application/json'
+            )
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            resp.headers['Access-Control-Allow-Private-Network'] = 'true'
+            return resp
+
+        if not url:
+            resp = app.response_class(
+                response=json.dumps({'ok': False, 'error': 'url is required'}),
+                status=400,
+                mimetype='application/json'
+            )
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            resp.headers['Access-Control-Allow-Private-Network'] = 'true'
+            return resp
+
+        with download_queue_lock:
+            download_queue.append({'url': url, 'title': title})
+            waiting_count = len(download_queue)
+
+        display_name = title or 'auto-detected metadata'
+        broadcast_log(f"🧩 Extension queued: {display_name} (waiting in queue: {waiting_count})")
+        warning = ""
+        try:
+            try_start_next_download()
+        except Exception as exc:
+            # Queue append already succeeded; report warning but keep successful response.
+            warning = str(exc)
+            broadcast_log(f"⚠️ Queue starter warning: {warning}")
+
+        result_payload = {'ok': True, 'queued': waiting_count, 'title': title, 'warning': warning, 'request_id': request_id}
+        save_extension_request_result(request_id, result_payload)
+
+        resp = app.response_class(
+            response=json.dumps(result_payload),
+            mimetype='application/json'
+        )
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Private-Network'] = 'true'
+        return resp
+    except Exception as exc:
+        resp = app.response_class(
+            response=json.dumps({'ok': False, 'error': str(exc)}),
+            status=500,
+            mimetype='application/json'
+        )
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Private-Network'] = 'true'
+        return resp
 
 
 @app.route('/api/delete/<path:filename>', methods=['POST'])
@@ -724,6 +1343,8 @@ def handle_seek_to(data):
 is_processing = False
 download_queue = []
 download_queue_lock = threading.Lock()
+DEMUCS_HEARTBEAT_SECONDS = 20
+DEMUCS_TIMEOUT_SECONDS = 30 * 60
 
 
 def emit_download_status():
@@ -756,7 +1377,11 @@ def run_download_job(job):
     url = job.get('url', '')
     title = job.get('title', '')
 
+    with download_queue_lock:
+        pending_after_start = len(download_queue)
+
     broadcast_log("=== Starting new job ===")
+    broadcast_log(f"Queue status: {pending_after_start} job(s) waiting behind current task")
 
     try:
         processor = KTVProcessor(log_cb=broadcast_log)
@@ -782,34 +1407,72 @@ def _run_demucs_process(input_path, output_dir, log_path):
     結束時作業系統會強制清空此進程佔用的 PyTorch 記憶體。
     """
     runtime_python = get_runtime_python_executable()
-    cmd = [
-        runtime_python,
-        "-m",
-        "demucs",
-        "--two-stems",
-        "vocals",
-        "-o",
-        output_dir,
-        input_path,
-    ]
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        with open(log_path, "w", encoding="utf-8") as log_file:
-            if result.stdout:
-                log_file.write(result.stdout)
-            if result.stderr:
-                if result.stdout:
-                    log_file.write("\n")
-                log_file.write(result.stderr)
-    except subprocess.CalledProcessError as exc:
-        with open(log_path, "w", encoding="utf-8") as log_file:
-            if exc.stdout:
-                log_file.write(exc.stdout)
-            if exc.stderr:
-                if exc.stdout:
-                    log_file.write("\n")
-                log_file.write(exc.stderr)
-        raise
+    model_marker_path = os.path.join(output_dir, "demucs_model.txt")
+    device_marker_path = os.path.join(output_dir, "demucs_device.txt")
+    configured_model_env = str(os.environ.get("KTV_DEMUCS_MODEL", "")).strip().lower()
+    configured_model_cfg = get_demucs_model_setting()
+    if configured_model_env in {"htdemucs", "mdx_q"}:
+        configured_model = configured_model_env
+    elif configured_model_cfg in {"htdemucs", "mdx_q"}:
+        configured_model = configured_model_cfg
+    else:
+        configured_model = ""
+    configured_device = str(os.environ.get("KTV_DEMUCS_DEVICE", "")).strip()
+    device_candidates = [configured_device] if configured_device else ["cuda", "cpu"]
+
+    failure_logs = []
+    last_error = None
+
+    for device_name in device_candidates:
+        if configured_model:
+            model_candidates = [configured_model]
+        else:
+            model_candidates = ["htdemucs", "mdx_q"] if device_name == "cuda" else ["mdx_q", "htdemucs"]
+
+        for model_name in model_candidates:
+            cmd = [
+                runtime_python,
+                "-m",
+                "demucs",
+                "--two-stems",
+                "vocals",
+                "-n",
+                model_name,
+                "--device",
+                device_name,
+                "-o",
+                output_dir,
+                input_path,
+            ]
+
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                with open(log_path, "w", encoding="utf-8") as log_file:
+                    log_file.write(f"[Demucs device] {device_name}\n")
+                    log_file.write(f"[Demucs model] {model_name}\n")
+                    if result.stdout:
+                        log_file.write(result.stdout)
+                    if result.stderr:
+                        if result.stdout:
+                            log_file.write("\n")
+                        log_file.write(result.stderr)
+                with open(model_marker_path, "w", encoding="utf-8") as model_file:
+                    model_file.write(model_name)
+                with open(device_marker_path, "w", encoding="utf-8") as device_file:
+                    device_file.write(device_name)
+                return
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+                out = "\n".join(part for part in [exc.stdout, exc.stderr] if part).strip()
+                failure_logs.append(f"[Demucs failed] device={device_name}, model={model_name}\n{out}")
+
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        if failure_logs:
+            log_file.write("\n\n".join(failure_logs))
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Demucs separation failed.")
 
 
 
@@ -1339,7 +2002,28 @@ class KTVProcessor:
             import multiprocessing
             p = multiprocessing.Process(target=_run_demucs_process, args=(temp_input, job_temp_dir, separator_log))
             p.start()
-            p.join() # 等待進程執行完畢
+            demucs_started_at = time.time()
+            next_heartbeat = demucs_started_at + DEMUCS_HEARTBEAT_SECONDS
+
+            while p.is_alive():
+                p.join(timeout=2)
+                now = time.time()
+                elapsed = int(now - demucs_started_at)
+
+                if now >= next_heartbeat:
+                    self.log(f"⏳ Demucs still running... elapsed {elapsed}s")
+                    next_heartbeat = now + DEMUCS_HEARTBEAT_SECONDS
+
+                if elapsed >= DEMUCS_TIMEOUT_SECONDS:
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                    p.join(timeout=5)
+                    raise Exception(
+                        f"Demucs timed out after {elapsed}s. "
+                        f"Try shorter videos, lower workload, or rerun this song later."
+                    )
 
             if os.path.exists(separator_log):
                 with open(separator_log, "r", encoding="utf-8", errors="replace") as log_file:
@@ -1353,6 +2037,15 @@ class KTVProcessor:
             # Demucs 會建立 model/track/stem 的輸出結構
             base_name = os.path.splitext(os.path.basename(temp_input))[0] # 會得到 "input"
             model_name = "htdemucs"
+            model_marker_path = os.path.join(job_temp_dir, "demucs_model.txt")
+            if os.path.exists(model_marker_path):
+                try:
+                    with open(model_marker_path, "r", encoding="utf-8") as marker_file:
+                        marker_value = str(marker_file.read()).strip()
+                    if marker_value:
+                        model_name = marker_value
+                except Exception:
+                    pass
             voc_path = os.path.join(job_temp_dir, model_name, base_name, "vocals.wav")
             acc_path = os.path.join(job_temp_dir, model_name, base_name, "no_vocals.wav")
 
@@ -1504,8 +2197,8 @@ if __name__ == "__main__":
                 t.daemon = True
                 t.start()
 
-                app = ServerApp()
-                app.mainloop()
+                gui_app = ServerApp()
+                gui_app.mainloop()
             except Exception as exc:
                 print(f"⚠️ GUI mode unavailable ({exc}). Falling back to headless server mode.")
                 run_server_thread()

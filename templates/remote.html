@@ -264,6 +264,19 @@
             font-size: 12px;
             font-weight: 600;
         }
+        .group-edit-artist {
+            border: 1px solid #3f6a74;
+            background: #2a3f45;
+            color: #cdebf2;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 9px;
+            cursor: pointer;
+        }
+        .group-edit-artist:hover {
+            background: #34515a;
+        }
         .song-picker-backdrop {
             position: fixed;
             inset: 0;
@@ -369,6 +382,98 @@
         }
         .song-picker-delete:hover {
             background: #c24b4b;
+        }
+        .song-picker-edit {
+            border: none;
+            border-radius: 8px;
+            background: #3e6aa7;
+            color: #fff;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .song-picker-edit:hover {
+            background: #4d7dc1;
+        }
+        .edit-inline {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .edit-inline input {
+            margin: 0;
+        }
+        .edit-inline-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .edit-save {
+            border: none;
+            border-radius: 8px;
+            background: #2f8f70;
+            color: #fff;
+            padding: 8px 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .edit-reset {
+            border: none;
+            border-radius: 8px;
+            background: #616161;
+            color: #fff;
+            padding: 8px 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .edit-hint {
+            color: #8fd5be;
+            font-size: 12px;
+            min-height: 16px;
+        }
+        .edit-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.62);
+            z-index: 1300;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+        }
+        .edit-modal-backdrop.open {
+            display: flex;
+        }
+        .edit-modal {
+            width: min(540px, 96vw);
+            background: #232323;
+            border: 1px solid #4a4a4a;
+            border-radius: 12px;
+            padding: 14px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+        }
+        .edit-modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            gap: 10px;
+        }
+        .edit-modal-title {
+            font-weight: 800;
+            color: #f2f2f2;
+        }
+        .edit-modal-close {
+            border: none;
+            border-radius: 8px;
+            background: #505050;
+            color: #fff;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
         }
         .song-item {
             background: #2a2a2a;
@@ -476,6 +581,9 @@
             <div class="card" id="song-detail-card">
                 <div class="card-head"><strong>Selected Song</strong><span id="song-detail-status">None</span></div>
                 <div id="song-detail-body" style="color:#cfcfcf; font-size:14px;">Select a song from the list to preview details and add to queue.</div>
+                <div class="edit-inline-actions" style="margin-top:10px;">
+                    <button class="edit-save" onclick="openEditMetadataModal(selectedSong)">Edit Title/Artist</button>
+                </div>
             </div>
 
             <div class="card">
@@ -495,6 +603,22 @@
         </div>
     </div>
 
+    <div id="edit-modal-backdrop" class="edit-modal-backdrop" onclick="onEditModalBackdrop(event)">
+        <div class="edit-modal">
+            <div class="edit-modal-head">
+                <div id="edit-modal-title" class="edit-modal-title">Edit Song Metadata</div>
+                <button class="edit-modal-close" onclick="closeEditMetadataModal()">Close</button>
+            </div>
+            <input type="text" id="edit-title" placeholder="Edit song title">
+            <input type="text" id="edit-artist" placeholder="Edit artist name">
+            <div class="edit-inline-actions">
+                <button class="edit-save" onclick="saveSelectedSongMetadata()">Save Title/Artist</button>
+                <button class="edit-reset" onclick="fillSongEditFields()">Reset</button>
+            </div>
+            <div id="edit-status" class="edit-hint"></div>
+        </div>
+    </div>
+
     <script>
         const socket = io();
         let allSongs = [];
@@ -510,6 +634,7 @@
         let remoteLyricsIndex = -1;
         let remoteCurrentPlaybackFile = '';
         let remoteCurrentPlaybackSeconds = 0;
+        let editModalSong = null;
 
         function parseSongMeta(filename) {
             const raw = String(filename || '').replace(/\.mp4$/i, '');
@@ -828,14 +953,64 @@
                     <div class="group-body">
                         <div class="group-head">
                             <span class="group-count">${songs.length} songs · Tap to pick</span>
+                            ${sortBy === 'artist' ? '<button class="group-edit-artist" type="button">Edit Artist</button>' : ''}
                         </div>
                     </div>
                 `;
                 const openPicker = () => openSongPicker(groupKey, groupName, songs);
                 groupItem.querySelector('.group-cover').addEventListener('click', openPicker);
                 groupItem.querySelector('.group-body').addEventListener('click', openPicker);
+                const editArtistBtn = groupItem.querySelector('.group-edit-artist');
+                if (editArtistBtn) {
+                    editArtistBtn.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        renameArtistGroup(groupName);
+                    });
+                }
                 list.appendChild(groupItem);
             });
+        }
+
+        async function renameArtistGroup(sourceArtistName) {
+            const sourceArtist = String(sourceArtistName || '').trim();
+            const status = document.getElementById('metadata-status');
+            if (!sourceArtist || /^unknown\s+artist$/i.test(sourceArtist)) {
+                status.innerText = 'Pick a named artist group to edit.';
+                return;
+            }
+
+            const suggested = sourceArtist;
+            const targetArtist = String(prompt(`Rename artist:\n${sourceArtist}\n\nNew artist name:`, suggested) || '').trim();
+            if (!targetArtist) {
+                return;
+            }
+            if (targetArtist.toLowerCase() === sourceArtist.toLowerCase()) {
+                status.innerText = 'Artist name unchanged.';
+                return;
+            }
+
+            status.innerText = `Updating artist "${sourceArtist}"...`;
+            try {
+                const response = await fetch('/api/metadata/artist-batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_artist: sourceArtist, target_artist: targetArtist }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    status.innerText = `Artist update failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+
+                await loadMetadata();
+                filter();
+                if (selectedSong) {
+                    selectSong(selectedSong);
+                }
+                status.innerText = `Artist updated: ${sourceArtist} -> ${targetArtist} (${data.updated || 0} songs)`;
+            } catch (error) {
+                status.innerText = 'Artist update failed.';
+            }
         }
 
         function openSongPicker(groupKey, groupName, songs) {
@@ -869,6 +1044,7 @@
                         </div>
                         <div class="song-picker-actions">
                             ${isQueued ? '<span class="song-picker-queued">Queued</span>' : ''}
+                            <button class="song-picker-edit">Edit</button>
                             <button class="song-picker-delete">Delete</button>
                         </div>
                     </div>
@@ -888,6 +1064,13 @@
                     }
                 });
                 const delBtn = li.querySelector('.song-picker-delete');
+                const editBtn = li.querySelector('.song-picker-edit');
+                editBtn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    selectSong(song);
+                    closeSongPicker();
+                    openEditMetadataModal(song);
+                });
                 delBtn.addEventListener('click', async (event) => {
                     event.stopPropagation();
                     const deleted = await deleteSongFromOrdering(song, titleOnly, false);
@@ -959,7 +1142,86 @@
                 <span style="color:#c6c6c6;">Artist: ${escapeHtml(meta.artist || 'Unknown')}</span><br>
                 <span style="color:#9f9f9f;">Album: ${escapeHtml(meta.album || 'N/A')} · Genre: ${escapeHtml(meta.genre || 'Unknown')}</span>
             `;
+            fillSongEditFields();
             filter();
+        }
+
+        function openEditMetadataModal(filename) {
+            if (!filename) return;
+            editModalSong = filename;
+            selectedSong = filename;
+            fillSongEditFields();
+            const meta = getSongRecord(filename);
+            document.getElementById('edit-modal-title').innerText = `Edit: ${cleanDisplaySongTitle(meta.title)}`;
+            document.getElementById('edit-modal-backdrop').classList.add('open');
+        }
+
+        function closeEditMetadataModal() {
+            document.getElementById('edit-modal-backdrop').classList.remove('open');
+            document.getElementById('edit-status').innerText = '';
+            editModalSong = null;
+        }
+
+        function onEditModalBackdrop(event) {
+            if (event.target && event.target.id === 'edit-modal-backdrop') {
+                closeEditMetadataModal();
+            }
+        }
+
+        function fillSongEditFields() {
+            const titleInput = document.getElementById('edit-title');
+            const artistInput = document.getElementById('edit-artist');
+            const statusEl = document.getElementById('edit-status');
+            const targetSong = editModalSong || selectedSong;
+            if (!targetSong) {
+                titleInput.value = '';
+                artistInput.value = '';
+                statusEl.innerText = '';
+                return;
+            }
+            const meta = getSongRecord(targetSong);
+            titleInput.value = String(meta.title || '').trim();
+            artistInput.value = String(meta.artist || '').trim();
+            statusEl.innerText = '';
+        }
+
+        async function saveSelectedSongMetadata() {
+            const statusEl = document.getElementById('edit-status');
+            const targetSong = editModalSong || selectedSong;
+            if (!targetSong) {
+                statusEl.innerText = 'Select a song first.';
+                return;
+            }
+
+            const titleValue = String(document.getElementById('edit-title').value || '').trim();
+            const artistValue = String(document.getElementById('edit-artist').value || '').trim();
+            if (!titleValue) {
+                statusEl.innerText = 'Title cannot be empty.';
+                return;
+            }
+
+            statusEl.innerText = 'Saving metadata...';
+            try {
+                const response = await fetch(`/api/metadata/${encodeURIComponent(targetSong)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: titleValue, artist: artistValue }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    statusEl.innerText = `Save failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+
+                await loadMetadata();
+                selectSong(targetSong);
+                statusEl.innerText = 'Saved to metadata.';
+                setTimeout(() => {
+                    closeEditMetadataModal();
+                }, 180);
+            } catch (error) {
+                statusEl.innerText = 'Save failed.';
+            }
         }
 
         function addToQueue(filename) {

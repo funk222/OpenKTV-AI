@@ -259,6 +259,102 @@ This prevents stale entries where the file is deleted but the UI still shows it.
 
 ---
 
+## 4. Chrome Extension: One-Click Add Song
+
+A ready-to-load Chrome extension is included in:
+
+```text
+chrome-extension/
+```
+
+### 4.1 What It Does
+
+- click the extension icon on a song page (for example YouTube)
+- send the current tab URL + page title to OpenKTV
+- OpenKTV queues it into the same download pipeline as admin page jobs
+
+### 4.2 Backend API Used
+
+- endpoint: `POST /api/extension/add-song`
+- payload:
+
+```json
+{
+	"url": "https://www.youtube.com/watch?v=...",
+	"title": "Page Title"
+}
+```
+
+### 4.3 Install Steps (Chrome)
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select folder: `OpenKTV-AI/chrome-extension`
+5. Open extension **Options** and set your server URL (default: `http://127.0.0.1:5000`)
+
+Example server URL on LAN:
+
+```text
+http://192.168.1.100:5000
+```
+
+### 4.4 Notes
+
+- OpenKTV server must be running when clicking the extension.
+- If server is unavailable, extension will show failure via action title/badge.
+
+---
+
+## 5. Package as EXE (Windows)
+
+This repository now includes one-click packaging scripts:
+
+- `build_exe.ps1`
+- `build_exe.bat`
+
+### 5.1 Quick Build
+
+1. Open PowerShell in project root
+2. Run:
+
+```powershell
+.\build_exe.ps1
+```
+
+Or double-click:
+
+```text
+build_exe.bat
+```
+
+### 5.2 Output
+
+After build completes:
+
+```text
+dist/OpenKTV-AI/OpenKTV-AI.exe
+```
+
+Portable package (recommended for distribution):
+
+```text
+dist/OpenKTV-AI-portable.zip
+```
+
+The script also copies optional runtime files when present:
+
+- `yt-dlp.exe`
+- `ffmpeg/`
+- `start_hidden.ps1`
+
+### 5.3 Notes
+
+- Uses `.venv/Scripts/python.exe` by default.
+- Uses PyInstaller `--onedir` for better compatibility with templates and media tools.
+- Copies common runtime DLLs (`vcruntime*.dll`, `msvcp140.dll`, `python*.dll`) into output folder.
+- Target Windows PCs normally do not need Visual Studio or Python installed; just unzip and run `OpenKTV-AI.exe`.
+
 ## 4. Download and AI Separation Flow
 
 ### 4.1 Download Process

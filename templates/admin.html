@@ -88,6 +88,12 @@
             .row-remove { width: 100%; }
         }
         .batch-help { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+        .inline-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .inline-row input[type="text"] { margin-bottom: 0; flex: 1 1 440px; }
+        .inline-row .btn-secondary { width: auto; margin-bottom: 0; }
+        .path-hint { margin-top: 8px; font-size: 12px; color: #9ec7ff; word-break: break-all; }
+        .check-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: #d8d8d8; }
+        .check-row input[type="checkbox"] { width: auto; margin: 0; }
         
         .qr-grid {
             display: grid;
@@ -177,6 +183,39 @@
 
     <div class="card">
         <h3>⚙️ Maintenance</h3>
+        <label>Song Library Path:</label>
+        <div class="inline-row">
+            <input type="text" id="library_path" placeholder="e.g. D:\\KTV\\MyLibrary">
+            <button class="btn-secondary" onclick="loadLibraryPath()">Refresh</button>
+            <button class="btn-secondary" onclick="pickLibraryPath()">Browse...</button>
+        </div>
+        <div class="check-row">
+            <input type="checkbox" id="move_existing" checked>
+            <label for="move_existing" style="margin:0;">Move existing converted files to the new path</label>
+        </div>
+        <div class="check-row">
+            <input type="checkbox" id="allow_unavailable" checked>
+            <label for="allow_unavailable" style="margin:0;">Allow setting remote/offline path when share is temporarily unavailable</label>
+        </div>
+        <div class="check-row">
+            <input type="checkbox" id="sync_metadata" checked>
+            <label for="sync_metadata" style="margin:0;">Update metadata entries during rescan</label>
+        </div>
+        <button id="btn_apply_path" class="btn-secondary" onclick="applyLibraryPath()">Apply Library Path</button>
+        <button id="btn_rescan" class="btn-secondary" onclick="rescanLibraryFiles()">Rescan / Sync Library Files</button>
+        <div id="library_status" class="path-hint"></div>
+        <hr style="border: 0; border-top: 1px solid #3b3b3b; margin: 16px 0;">
+        <label>Demucs Model Preference:</label>
+        <div class="inline-row">
+            <select id="demucs_model">
+                <option value="htdemucs">htdemucs (quality default)</option>
+                <option value="mdx_q">mdx_q (faster)</option>
+                <option value="auto">auto (adaptive)</option>
+            </select>
+            <button id="btn_demucs_apply" class="btn-secondary" onclick="applyDemucsSettings()">Apply Demucs Setting</button>
+        </div>
+        <div id="demucs_status" class="path-hint"></div>
+        <hr style="border: 0; border-top: 1px solid #3b3b3b; margin: 16px 0;">
         <button id="btn_update" class="btn-update" onclick="updateYtDlp()">🔄 Update yt-dlp Core</button>
     </div>
 
@@ -191,13 +230,180 @@
         const btnBatch = document.getElementById('btn_batch');
         const btnAddRow = document.getElementById('btn_add_row');
         const btnUpdate = document.getElementById('btn_update');
+        const btnApplyPath = document.getElementById('btn_apply_path');
+        const btnRescan = document.getElementById('btn_rescan');
+        const btnDemucsApply = document.getElementById('btn_demucs_apply');
         const batchRowsContainer = document.getElementById('batch_rows');
+        const libraryPathInput = document.getElementById('library_path');
+        const libraryStatus = document.getElementById('library_status');
+        const moveExistingInput = document.getElementById('move_existing');
+        const allowUnavailableInput = document.getElementById('allow_unavailable');
+        const syncMetadataInput = document.getElementById('sync_metadata');
+        const demucsModelSelect = document.getElementById('demucs_model');
+        const demucsStatus = document.getElementById('demucs_status');
         let queuedCount = 0;
 
         function setBusyUi(isBusy, labelText) {
             btnUpdate.disabled = isBusy;
             btnAddRow.disabled = isBusy;
             btnBatch.innerText = isBusy ? `Queue Processing (${queuedCount} waiting)` : "Start Processing";
+        }
+
+        async function loadLibraryPath() {
+            libraryStatus.innerText = 'Loading library path...';
+            try {
+                const response = await fetch('/api/library/path');
+                const data = await response.json();
+                if (!data.ok) {
+                    libraryStatus.innerText = `Load failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                libraryPathInput.value = data.path || '';
+                if (data.available === false) {
+                    libraryStatus.innerText = `Current library set to ${data.path || '(not set)'} but share is offline now. Cached songs: ${Number(data.song_count || 0)}. ${data.warning || ''}`;
+                } else {
+                    libraryStatus.innerText = `Current library: ${data.path || '(not set)'} · Songs: ${Number(data.song_count || 0)}`;
+                }
+            } catch (error) {
+                libraryStatus.innerText = 'Load failed.';
+            }
+        }
+
+        async function pickLibraryPath() {
+            libraryStatus.innerText = 'Opening folder picker...';
+            try {
+                const response = await fetch('/api/library/pick-path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const data = await response.json();
+                if (data.cancelled) {
+                    libraryStatus.innerText = 'Folder picker cancelled.';
+                    return;
+                }
+                if (!response.ok || !data.ok) {
+                    libraryStatus.innerText = `Folder picker failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                libraryPathInput.value = data.path || '';
+                libraryStatus.innerText = `Selected folder: ${data.path}`;
+            } catch (error) {
+                libraryStatus.innerText = 'Folder picker failed.';
+            }
+        }
+
+        async function applyLibraryPath() {
+            const targetPath = libraryPathInput.value.trim();
+            if (!targetPath) {
+                alert('Please input a valid library path.');
+                return;
+            }
+            if (!confirm('Apply new song library path now?')) {
+                return;
+            }
+
+            btnApplyPath.disabled = true;
+            btnRescan.disabled = true;
+            libraryStatus.innerText = 'Applying new library path...';
+            try {
+                const response = await fetch('/api/library/path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path: targetPath,
+                        move_existing: !!moveExistingInput.checked,
+                        allow_unavailable: !!allowUnavailableInput.checked,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    libraryStatus.innerText = `Apply failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                libraryPathInput.value = data.new_path || targetPath;
+                if (data.available === false) {
+                    libraryStatus.innerText = `Library path saved (${data.new_path}) but remote share is currently unavailable. Existing metadata and queue were kept safe. ${data.warning || ''}`;
+                } else {
+                    libraryStatus.innerText = `Updated library to ${data.new_path}. Moved: ${data.moved}, skipped: ${data.skipped}.`;
+                }
+            } catch (error) {
+                libraryStatus.innerText = 'Apply failed.';
+            } finally {
+                btnApplyPath.disabled = false;
+                btnRescan.disabled = false;
+            }
+        }
+
+        async function rescanLibraryFiles() {
+            btnRescan.disabled = true;
+            libraryStatus.innerText = 'Scanning shared library changes...';
+            try {
+                const response = await fetch('/api/library/rescan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sync_metadata: !!syncMetadataInput.checked,
+                    }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    libraryStatus.innerText = `Rescan failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                if (data.library_available === false) {
+                    libraryStatus.innerText = `Share offline, skipped delete/sync actions to protect metadata. Reason: ${data.library_reason || 'unknown'}`;
+                    return;
+                }
+                libraryStatus.innerText = `Rescan done. Songs: ${data.songs}, metadata +${data.metadata_added}/-${data.metadata_removed}, queue removed: ${data.queue_removed}.`;
+            } catch (error) {
+                libraryStatus.innerText = 'Rescan failed.';
+            } finally {
+                btnRescan.disabled = false;
+            }
+        }
+
+        async function loadDemucsSettings() {
+            demucsStatus.innerText = 'Loading Demucs setting...';
+            try {
+                const response = await fetch('/api/settings/demucs');
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    demucsStatus.innerText = `Load failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                demucsModelSelect.value = data.model || 'htdemucs';
+                demucsStatus.innerText = `Current: ${data.model}${data.env_override ? ` (env override active: ${data.effective_model})` : ''}`;
+            } catch (error) {
+                demucsStatus.innerText = 'Load failed.';
+            }
+        }
+
+        async function applyDemucsSettings() {
+            const model = demucsModelSelect.value;
+            if (!model) {
+                demucsStatus.innerText = 'Please select a model option.';
+                return;
+            }
+            btnDemucsApply.disabled = true;
+            demucsStatus.innerText = 'Saving Demucs setting...';
+            try {
+                const response = await fetch('/api/settings/demucs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    demucsStatus.innerText = `Save failed: ${data.error || 'unknown error'}`;
+                    return;
+                }
+                demucsStatus.innerText = `Saved: ${data.model}. New jobs will use this preference.`;
+            } catch (error) {
+                demucsStatus.innerText = 'Save failed.';
+            } finally {
+                btnDemucsApply.disabled = false;
+            }
         }
 
         function createBatchRow(url = '', title = '') {
@@ -323,6 +529,8 @@
 
         resetBatchRows();
         setupQrCodes();
+        loadLibraryPath();
+        loadDemucsSettings();
     </script>
 </body>
 </html>
