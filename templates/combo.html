@@ -202,8 +202,25 @@
         .control-group { background: #333; padding: 12px; border-radius: 8px; margin-bottom: 15px; }
         .control-label { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; color: #ccc;}
         input[type=range] { width: 100%; cursor: pointer;}
-        .queue-box { background: #111; padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #444; flex-shrink: 0;}
-        .queue-title { color: #4CAF50; font-size: 14px; margin-bottom: 5px; font-weight: bold; display:flex; align-items:center; justify-content:space-between; gap:8px;}
+        .sidebar-card {
+            background: #1c1c1c;
+            border: 1px solid #3f3f3f;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+        .sidebar-card-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            color: #f1f1f1;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .queue-box { flex-shrink: 0; }
+        .queue-title { margin: 0; }
         #queue-list { font-size: 14px; color: #aaa; padding-left: 20px; margin: 0; }
         #queue-list li { background: none; border: none; padding: 3px 0; display: list-item; list-style-type: decimal; }
         .queue-toggle { background: #455a64; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
@@ -220,8 +237,12 @@
         ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;}
         .song-btn { background: #009688; border: none; padding: 8px 16px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
         .song-delete { background: #d32f2f; border: none; padding: 8px 12px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
-        .lyrics-tools { background: #1c1c1c; border: 1px solid #3f3f3f; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
-        .lyrics-tools-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; color: #f1f1f1; }
+        .lyrics-tools {
+            cursor: default;
+        }
+        .lyrics-tools-title {
+            margin-bottom: 8px;
+        }
         .lyrics-tools-toggle { background: #455a64; color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
         .lyrics-tools-visibility { background: #4a6572; color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
         .lyrics-tools.collapsed .lyrics-tools-body { display: none; }
@@ -235,27 +256,15 @@
         .lyrics-candidate-preview { color: #9e9e9e; font-size: 13px; white-space: pre-wrap; max-height: 72px; overflow: hidden; }
         .lyrics-candidate button { margin-top: 6px; width: 100%; background: #2e7d32; border: none; border-radius: 6px; color: #fff; padding: 8px; cursor: pointer; font-weight: 600; }
         .sidebar-lyrics-panel {
-            background: #171717;
-            border: 1px solid #343434;
-            border-radius: 10px;
-            padding: 10px;
-            margin-top: 8px;
             flex: 1 1 auto;
             min-height: 180px;
             cursor: pointer;
             user-select: none;
             display: flex;
-        .sidebar-lyric-line:hover {
-            background: rgba(255, 255, 255, 0.08);
-            color: #ffffff;
-        }
             flex-direction: column;
             overflow: hidden;
         }
         .sidebar-lyrics-head {
-            color: #9ec7ff;
-            font-weight: 700;
-            font-size: 13px;
             margin-bottom: 8px;
             flex: 0 0 auto;
             display: flex;
@@ -295,6 +304,10 @@
             border-radius: 8px;
             margin-bottom: 3px;
             transition: background 0.14s ease, color 0.14s ease;
+        }
+        .sidebar-lyric-line:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: #ffffff;
         }
         .sidebar-lyric-line.current {
             color: #ffffff;
@@ -347,16 +360,26 @@
     <div id="layout-splitter" title="Drag to resize controller panel"></div>
 
     <div id="remote-container">
-        <div class="queue-box" id="queue-box">
-            <div class="queue-title">
+        <div class="queue-box sidebar-card" id="queue-box">
+            <div class="queue-title sidebar-card-title">
                 <span>📋 Queue</span>
                 <button class="queue-toggle" id="queue-toggle-btn" onclick="toggleQueueBox()">Collapse</button>
             </div>
             <ul id="queue-list"><li>(none)</li></ul>
         </div>
 
-        <div class="lyrics-tools" id="lyrics-tools">
-            <div class="lyrics-tools-title">
+        <div class="sidebar-lyrics-panel sidebar-card" id="sidebar-lyrics-panel">
+            <div class="sidebar-lyrics-head sidebar-card-title">
+                <span>📝 Synced Lyrics</span>
+                <button id="lyrics-adjust-btn" class="lyrics-adjust-btn" onclick="toggleLyricsAdjustMode()">Adjust Lyrics Sync</button>
+            </div>
+            <div class="sidebar-lyrics-list" id="sidebar-lyrics-list">
+                <div class="sidebar-lyrics-empty">No lyrics loaded.</div>
+            </div>
+        </div>
+
+        <div class="lyrics-tools sidebar-card" id="lyrics-tools">
+            <div class="lyrics-tools-title sidebar-card-title">
                 <strong>🎵 Lyrics Match</strong>
                 <div style="display:flex; align-items:center; gap:8px;">
                     <small id="lyrics-song-name">No song selected</small>
@@ -374,16 +397,6 @@
                 </div>
                 <div class="lyrics-status" id="lyrics-status"></div>
                 <div class="lyrics-candidates" id="lyrics-candidates"></div>
-            </div>
-        </div>
-
-        <div class="sidebar-lyrics-panel" id="sidebar-lyrics-panel">
-            <div class="sidebar-lyrics-head">
-                <span>📝 Synced Lyrics</span>
-                <button id="lyrics-adjust-btn" class="lyrics-adjust-btn" onclick="toggleLyricsAdjustMode()">Adjust Lyrics Sync</button>
-            </div>
-            <div class="sidebar-lyrics-list" id="sidebar-lyrics-list">
-                <div class="sidebar-lyrics-empty">No lyrics loaded.</div>
             </div>
         </div>
     </div>
@@ -796,11 +809,25 @@ const socket = io();
                 node.classList.toggle('current', idx === lyricsIndex);
                 node.classList.toggle('passed', lyricsIndex >= 0 && idx < lyricsIndex);
             });
-            if (lyricsIndex >= 0) {
-                const current = sidebarLyricsList.querySelector(`.sidebar-lyric-line[data-index="${lyricsIndex}"]`);
-                if (current) {
-                    current.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                }
+            if (lyricsIndex < 0) return;
+
+            const current = sidebarLyricsList.querySelector(`.sidebar-lyric-line[data-index="${lyricsIndex}"]`);
+            if (!current) return;
+
+            // Keep lyric auto-follow inside the synced lyrics panel only.
+            const viewTop = sidebarLyricsList.scrollTop;
+            const viewBottom = viewTop + sidebarLyricsList.clientHeight;
+            const containerRect = sidebarLyricsList.getBoundingClientRect();
+            const lineRect = current.getBoundingClientRect();
+            const lineTop = viewTop + (lineRect.top - containerRect.top);
+            const lineBottom = lineTop + lineRect.height;
+            const edgePadding = 24;
+
+            if (lineTop < (viewTop + edgePadding) || lineBottom > (viewBottom - edgePadding)) {
+                const centeredTop = lineTop - ((sidebarLyricsList.clientHeight - lineRect.height) / 2);
+                const maxScroll = Math.max(0, sidebarLyricsList.scrollHeight - sidebarLyricsList.clientHeight);
+                const targetTop = Math.min(maxScroll, Math.max(0, centeredTop));
+                sidebarLyricsList.scrollTo({ top: targetTop, behavior: 'smooth' });
             }
         }
 
