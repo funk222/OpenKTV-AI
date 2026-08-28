@@ -195,6 +195,8 @@ SONGS_DIR = _configured_library or os.path.join(BASE_DIR, "ktv_songs")
 TEMP_BASE_DIR = os.path.join(BASE_DIR, "temp_processing") 
 SONG_METADATA_PATH = os.path.join(SONGS_DIR, "_song_metadata.json")
 SONG_METADATA_BACKUP_PATH = os.path.join(LOCAL_STATE_DIR, "_song_metadata_backup.json")
+PLAYBACK_STATE_PATH = os.path.join(LOCAL_STATE_DIR, "_playback_state.json")
+PLAYBACK_HISTORY_DAYS = 14
 LAST_KNOWN_SONGS = []
 
 try:
@@ -350,6 +352,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 EXT_REQUEST_TTL_SECONDS = 300
 extension_request_cache = {}
 extension_request_lock = threading.Lock()
+playback_state_lock = threading.Lock()
 
 
 def _prune_extension_request_cache(now_ts=None):
@@ -398,10 +401,23 @@ LOCAL_IP = get_local_ip()
 PORT = 5000
 APP_VERSION = "1.1.1"
 
+def _push_gui_log(msg):
+    text = str(msg or "").strip()
+    if not text:
+        return
+    # In frozen EXE mode, print output is already intercepted by GUIWriter.
+    if getattr(sys, 'frozen', False):
+        return
+    system_log_queue.put(text)
+
+
 def broadcast_log(msg):
-    # 用 print 就會自動被我們的 GUIWriter 抓走並顯示在介面上
-    print(msg)
-    socketio.emit('admin_log', {'msg': msg})
+    text = str(msg or "").strip()
+    if not text:
+        return
+    _push_gui_log(text)
+    print(text)
+    socketio.emit('admin_log', {'msg': text})
 
 
 def broadcast_song_list():
@@ -409,6 +425,88 @@ def broadcast_song_list():
     socketio.emit('refresh_list')
     socketio.emit('update_list', songs)
     return songs
+
+
+def _today_key():
+    return time.strftime("%Y-%m-%d")
+
+
+def load_playback_state():
+    if not os.path.exists(PLAYBACK_STATE_PATH):
+        return {"by_date": {}}
+    try:
+        with open(PLAYBACK_STATE_PATH, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if isinstance(payload, dict) and isinstance(payload.get("by_date"), dict):
+            return payload
+    except Exception:
+        pass
+    return {"by_date": {}}
+
+
+def save_playback_state(state):
+    payload = state if isinstance(state, dict) else {"by_date": {}}
+    with open(PLAYBACK_STATE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+def _prune_playback_state(by_date):
+    if not isinstance(by_date, dict):
+        return {}
+    keys = sorted([k for k in by_date.keys() if isinstance(k, str)])
+    if len(keys) <= PLAYBACK_HISTORY_DAYS:
+        return by_date
+    keep = set(keys[-PLAYBACK_HISTORY_DAYS:])
+    return {k: v for k, v in by_date.items() if k in keep}
+
+
+def get_today_played_map():
+    state = load_playback_state()
+    by_date = state.get("by_date") if isinstance(state, dict) else {}
+    today_state = by_date.get(_today_key(), {}) if isinstance(by_date, dict) else {}
+    played = today_state.get("played") if isinstance(today_state, dict) else {}
+    return played if isinstance(played, dict) else {}
+
+
+def mark_song_played(filename):
+    safe_name = os.path.basename(str(filename or "").strip())
+    if not safe_name:
+        return
+    now_text = time.strftime("%Y-%m-%d %H:%M:%S")
+    today = _today_key()
+    with playback_state_lock:
+        state = load_playback_state()
+        by_date = state.get("by_date") if isinstance(state, dict) else {}
+        if not isinstance(by_date, dict):
+            by_date = {}
+        today_state = by_date.get(today, {})
+        if not isinstance(today_state, dict):
+            today_state = {}
+        played = today_state.get("played")
+        if not isinstance(played, dict):
+            played = {}
+        played[safe_name] = now_text
+        today_state["played"] = played
+        by_date[today] = today_state
+        state["by_date"] = _prune_playback_state(by_date)
+        save_playback_state(state)
+
+
+def get_playback_snapshot():
+    played = get_today_played_map()
+    return {
+        "today": _today_key(),
+        "played_today": played,
+        "played_count": len(played),
+    }
+
+
+def emit_play_video(filename, title=None):
+    safe_name = os.path.basename(str(filename or "").strip())
+    if not safe_name:
+        return
+    mark_song_played(safe_name)
+    socketio.emit('play_video', {'filename': safe_name, 'title': title or safe_name})
 
 
 def remove_song_from_queue(filename):
@@ -505,7 +603,7 @@ def rescan_library_files(sync_metadata=True):
 
     if removed_current:
         if len(playlist_queue) > 0:
-            socketio.emit('play_video', {'filename': playlist_queue[0], 'title': playlist_queue[0]})
+            emit_play_video(playlist_queue[0], playlist_queue[0])
         else:
             socketio.emit('stop_video')
 
@@ -586,6 +684,29 @@ def is_metadata_completed(entry):
 def normalize_song_metadata_entry(filename, existing=None):
     existing = existing if isinstance(existing, dict) else {}
     parsed = parse_filename_metadata(filename)
+    safe_name = os.path.basename(str(filename or "").strip())
+
+    added_ts_value = existing.get("added_ts", 0)
+    try:
+        added_ts = int(added_ts_value or 0)
+    except Exception:
+        added_ts = 0
+
+    if added_ts <= 0 and safe_name:
+        song_path = os.path.join(SONGS_DIR, safe_name)
+        try:
+            stat = os.stat(song_path)
+            added_ts = int(getattr(stat, "st_ctime", 0) or getattr(stat, "st_mtime", 0) or 0)
+        except Exception:
+            added_ts = 0
+
+    added_at = str(existing.get("added_at") or "").strip()
+    if not added_at and added_ts > 0:
+        try:
+            added_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(added_ts))
+        except Exception:
+            added_at = ""
+
     title = str(existing.get("title") or parsed["title"] or "").strip()
     artist = str(existing.get("artist") or parsed["artist"] or "").strip()
     album = str(existing.get("album") or parsed["album"] or "").strip()
@@ -600,6 +721,8 @@ def normalize_song_metadata_entry(filename, existing=None):
         "genre": genre,
         "artwork_url": artwork_url,
         "artist_image_url": artist_image_url,
+        "added_at": added_at,
+        "added_ts": added_ts,
         "updated_at": existing.get("updated_at") or "",
     }
     normalized["completed"] = is_metadata_completed(normalized)
@@ -977,7 +1100,8 @@ def get_song_list():
 @app.route('/api/metadata')
 def api_song_metadata():
     snapshot = build_song_metadata_snapshot()
-    return json.dumps({"ok": True, "metadata": snapshot})
+    playback = get_playback_snapshot()
+    return json.dumps({"ok": True, "metadata": snapshot, "playback": playback})
 
 
 @app.route('/api/metadata/<path:filename>', methods=['POST'])
@@ -1257,6 +1381,7 @@ def handle_song_status(data):
 def handle_add_queue(data):
     filename = data['filename']
     playlist_queue.append(filename)
+    broadcast_log(f"🎶 Queued: {filename} (queue: {len(playlist_queue)})")
     
     # 廣播更新所有設備上的歌單畫面
     socketio.emit('update_queue', playlist_queue)
@@ -1265,8 +1390,50 @@ def handle_add_queue(data):
     if len(playlist_queue) == 1:
         current_playback_state['filename'] = filename
         current_playback_state['seconds'] = 0.0
-        socketio.emit('play_video', {'filename': filename, 'title': filename})
+        emit_play_video(filename, filename)
         socketio.emit('song_status', {'filename': filename, 'seconds': 0.0})
+
+
+@socketio.on('remove_from_queue')
+def handle_remove_from_queue(data):
+    payload = data or {}
+    removed_index = None
+
+    try:
+        index_value = payload.get('index', None)
+        if index_value is not None:
+            candidate = int(index_value)
+            if 0 <= candidate < len(playlist_queue):
+                removed_index = candidate
+    except Exception:
+        removed_index = None
+
+    if removed_index is None:
+        filename = str(payload.get('filename') or '').strip()
+        if filename in playlist_queue:
+            removed_index = playlist_queue.index(filename)
+
+    if removed_index is None:
+        return
+
+    removed_song = playlist_queue[removed_index]
+    playlist_queue.pop(removed_index)
+    broadcast_log(f"🧹 Removed from queue: {removed_song} (queue: {len(playlist_queue)})")
+    socketio.emit('update_queue', playlist_queue)
+
+    if removed_index == 0:
+        if len(playlist_queue) > 0:
+            next_song = playlist_queue[0]
+            current_playback_state['filename'] = next_song
+            current_playback_state['seconds'] = 0.0
+            broadcast_log(f"▶️ Playing next: {next_song}")
+            emit_play_video(next_song, next_song)
+            socketio.emit('song_status', {'filename': next_song, 'seconds': 0.0})
+        else:
+            current_playback_state['filename'] = ''
+            current_playback_state['seconds'] = 0.0
+            broadcast_log("⏹️ Queue empty. Playback stopped.")
+            socketio.emit('stop_video')
 
 @socketio.on('request_play')
 def handle_request_play(data):
@@ -1288,7 +1455,7 @@ def handle_delete_song(data):
 
         if removed_current:
             if len(playlist_queue) > 0:
-                socketio.emit('play_video', {'filename': playlist_queue[0], 'title': playlist_queue[0]})
+                emit_play_video(playlist_queue[0], playlist_queue[0])
             else:
                 socketio.emit('stop_video')
     except Exception as exc:
@@ -1298,20 +1465,24 @@ def handle_delete_song(data):
 def handle_song_ended():
     if len(playlist_queue) > 0:
         # 移除剛剛唱完的那首歌
-        playlist_queue.pop(0) 
+        finished_song = playlist_queue.pop(0)
+        broadcast_log(f"✅ Finished: {finished_song}")
         socketio.emit('update_queue', playlist_queue)
         
         # 檢查是否還有下一首
         if len(playlist_queue) > 0:
             next_song = playlist_queue[0]
-            socketio.emit('play_video', {'filename': next_song, 'title': next_song})
+            broadcast_log(f"▶️ Playing next: {next_song}")
+            emit_play_video(next_song, next_song)
         else:
             # 沒歌了，停止畫面並回到待機狀態
+            broadcast_log("⏹️ Queue empty. Playback stopped.")
             socketio.emit('stop_video')
 
 @socketio.on('control')
 def handle_control(action):
     normalized = str(action or '').strip().lower()
+    broadcast_log(f"🎛️ Control: {normalized or 'unknown'}")
     if normalized in {'cut', 'stop', 'skip', 'next'}:
         # 多端按鈕命名可能不同，這些都視為「切到下一首」
         handle_song_ended()
@@ -1512,6 +1683,8 @@ def handle_update_ytdlp():
 def run_server_thread():
     try:
         print("🚀 Starting Flask server...")
+        broadcast_log(f"🌐 Server online: http://{LOCAL_IP}:{PORT}")
+        broadcast_log(f"📚 Song library: {SONGS_DIR}")
         
         # 【關鍵防護】強制關閉 Flask 雞婆的啟動橫幅 (Banner) 與日誌，從根本拔除報錯源頭
         import logging
@@ -2143,6 +2316,7 @@ class ServerApp(tk.Tk):
         
         # 啟動背景佇列監聽器
         self.check_log_queue()
+        _push_gui_log("🟢 GUI ready. Waiting for realtime events...")
 
     def create_clickable_link(self, parent, text_prefix, url, color):
         frame = tk.Frame(parent, bg="white")

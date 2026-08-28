@@ -203,9 +203,11 @@
         .control-label { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; color: #ccc;}
         input[type=range] { width: 100%; cursor: pointer;}
         .queue-box { background: #111; padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #444; flex-shrink: 0;}
-        .queue-title { color: #4CAF50; font-size: 14px; margin-bottom: 5px; font-weight: bold;}
+        .queue-title { color: #4CAF50; font-size: 14px; margin-bottom: 5px; font-weight: bold; display:flex; align-items:center; justify-content:space-between; gap:8px;}
         #queue-list { font-size: 14px; color: #aaa; padding-left: 20px; margin: 0; }
         #queue-list li { background: none; border: none; padding: 3px 0; display: list-item; list-style-type: decimal; }
+        .queue-toggle { background: #455a64; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+        .queue-box.collapsed #queue-list { display: none; }
 
         .seek-box { background: #333; padding: 12px; border-radius: 8px; margin-bottom: 15px; }
         .seek-times { display: flex; justify-content: space-between; font-size: 13px; color: #ccc; margin-top: 6px; }
@@ -345,8 +347,11 @@
     <div id="layout-splitter" title="Drag to resize controller panel"></div>
 
     <div id="remote-container">
-        <div class="queue-box">
-            <div class="queue-title">📋 Queue</div>
+        <div class="queue-box" id="queue-box">
+            <div class="queue-title">
+                <span>📋 Queue</span>
+                <button class="queue-toggle" id="queue-toggle-btn" onclick="toggleQueueBox()">Collapse</button>
+            </div>
             <ul id="queue-list"><li>(none)</li></ul>
         </div>
 
@@ -414,6 +419,8 @@ const socket = io();
         const dockTimeTotal = document.getElementById('dock-time-total');
         const layoutSplitter = document.getElementById('layout-splitter');
         const remoteContainer = document.getElementById('remote-container');
+        const queueBox = document.getElementById('queue-box');
+        const queueToggleBtn = document.getElementById('queue-toggle-btn');
         let audioCtx, source, splitter, gainL, gainR, merger, masterGain, pitchShift;
         let isAudioSetup = false;
         let currentMode = 'original';
@@ -476,6 +483,27 @@ const socket = io();
             try {
                 localStorage.setItem('comboLyricsToolsCollapsed', shouldCollapse ? '1' : '0');
             } catch (error) {
+            }
+        }
+
+        function toggleQueueBox(forceCollapsed) {
+            const shouldCollapse = typeof forceCollapsed === 'boolean'
+                ? forceCollapsed
+                : !queueBox.classList.contains('collapsed');
+            queueBox.classList.toggle('collapsed', shouldCollapse);
+            queueToggleBtn.innerText = shouldCollapse ? 'Expand' : 'Collapse';
+            try {
+                localStorage.setItem('comboQueueCollapsed', shouldCollapse ? '1' : '0');
+            } catch (error) {
+            }
+        }
+
+        function loadQueueBoxState() {
+            try {
+                const collapsed = localStorage.getItem('comboQueueCollapsed') === '1';
+                toggleQueueBox(collapsed);
+            } catch (error) {
+                toggleQueueBox(false);
             }
         }
 
@@ -1359,6 +1387,7 @@ const socket = io();
         function track(mode) { socket.emit('change_track', mode); }
 
         loadLyricsVisibilityState();
+        loadQueueBoxState();
         loadLyricsToolsState();
         initLayoutSplitter();
         refreshQuickTrackButtons();
